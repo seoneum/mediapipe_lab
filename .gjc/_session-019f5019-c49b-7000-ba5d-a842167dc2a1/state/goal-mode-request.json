@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "kind": "goal_mode_request",
+  "source": "ultragoal",
+  "objective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+  "createdAt": "2026-07-11T15:02:02.134Z",
+  "goalsPath": "/Users/seoneum/ai/mediapipe_lab/.gjc/_session-019f5019-c49b-7000-ba5d-a842167dc2a1/ultragoal/goals.json",
+  "sessionId": "019f5019-c49b-7000-ba5d-a842167dc2a1"
+}

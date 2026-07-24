@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "child_id": "final-audit",
+  "display_name": "Final Audit Child",
+  "age_band": "초등 저학년",
+  "communication_modality": "시각 단서",
+  "local_canonical_id": "local-6559bea5fa",
+  "canonical_status": "withdrawn_locked",
+  "confirmed_preferences": [
+    "동물 카드"
+  ],
+  "confirmed_avoidances": [],
+  "effective_strategies": [
+    "짧은 단계 제시"
+  ],
+  "triggers_and_calming_supports": [],
+  "handoff_notes": [],
+  "approved_session_summaries": [
+    {
+      "session_id": "session-042db0a8",
+      "title": "최종 점검 세션",
+      "activity_name": "분류 활동",
+      "observed_response": "선호 카드 제시 후 참여",
+      "educator_interpretation": "보수적 초안과 일치",
+      "approved_by": "teacher-a",
+      "tags": [],
+      "created_at": "2026-06-22T02:22:33.137986+00:00"
+    }
+  ],
+  "approved_plan_history": [
+    {
+      "recommendation_id": "plan-c38c80f9",
+      "goal": "분류 활동 유지",
+      "summary": "Final Audit Child의 현재 목표는 `분류 활동 유지`이며, 선호 자극을 활용해 진입 부담을 낮추고 확인된 전략을 유지하는 보수적 학습 초안을 권장한다.",
+      "suggested_activities": [
+        "선호 자극(동물 카드)을 먼저 제시한 뒤 목표 활동 `분류 활동 유지`로 짧게 전환한다.",
+        "한 번에 한 단계씩 안내하고, 전략(짧은 단계 제시)에 맞춰 성공 기준을 작게 나눈다.",
+        "회피 자극(과도한 자극)이 나타나면 지원 수단(익숙한 전환 문구와 휴식 신호)으로 강도를 낮춘 대체 과제를 제시한다."
+      ],
+      "rationale_lines": [
+        "보호자/교사 입력: 짧은 피드백 선호",
+        "확인된 선호 자극: 동물 카드",
+        "효과적 전략: 짧은 단계 제시",
+        "주의할 회피 자극: 과도한 자극"
+      ],
+      "drafted_by": "teacher-a",
+      "approved_by": "teacher-a",
+      "status": "approved",
+      "created_at": "2026-06-22T02:22:33.191596+00:00"
+    }
+  ],
+  "access_audit_records": [
+    {
+      "event_type": "handoff_brief_generated",
+      "actor_id": "local-operator",
+      "timestamp": "2026-06-22T02:22:33.246047+00:00",
+      "details": {
+        "output": "outputs/ondamm/artifacts/final-audit-handoff.md"
+      }
+    },
+    {
+      "event_type": "signed_export_generated",
+      "actor_id": "local-operator",
+      "timestamp": "2026-06-22T02:22:33.607944+00:00",
+      "details": {
+        "output": "outputs/ondamm/artifacts/final-audit-export.md",
+        "manifest_output": "outputs/ondamm/artifacts/final-audit-export.manifest.json",
+        "artifact_id": "artifact-807d5d3af42e"
+      }
+    },
+    {
+      "event_type": "authoritative_withdrawal",
+      "actor_id": "guardian-admin",
+      "timestamp": "2026-06-22T02:22:33.715547+00:00",
+      "details": {
+        "reason_code": "consent_withdrawn",
+        "reason": "최종 점검"
+      }
+    }
+  ],
+  "created_at": "2026-06-22T02:22:33.083742+00:00",
+  "updated_at": "2026-06-22T02:22:33.715548+00:00"
+}

@@ -1,0 +1,14 @@
+# MediaPipe Python Tasks 핵심 패키지
+mediapipe
+
+# OpenCV 카메라/이미지 입출력. mediapipe 의존성과 맞추기 위해 contrib 판 사용.
+opencv-contrib-python
+
+# 이미지 배열/수치 계산
+numpy
+
+# 시각화/일부 MediaPipe 내부 설정 파일 생성 경로와 관련
+matplotlib
+
+# 오디오 실험을 확장할 때 사용할 패키지
+soundfile

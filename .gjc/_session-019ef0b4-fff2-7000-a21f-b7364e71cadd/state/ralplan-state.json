@@ -1,0 +1,29 @@
+{
+  "active": false,
+  "version": 2,
+  "current_phase": "completed",
+  "skill": "ralplan",
+  "cwd": "/Users/seoneum/ai/mediapipe_lab",
+  "updated_at": "2026-06-22T22:00:07.440Z",
+  "session_id": "019ef0b4-fff2-7000-a21f-b7364e71cadd",
+  "receipt": {
+    "version": 1,
+    "skill": "ralplan",
+    "owner": "gjc-state-cli",
+    "command": "gjc state ralplan write",
+    "state_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/state/sessions/019ef0b4-fff2-7000-a21f-b7364e71cadd/skill-active-state.json",
+    "storage_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/state/sessions/019ef0b4-fff2-7000-a21f-b7364e71cadd/ralplan-state.json",
+    "mutated_at": "2026-06-22T22:00:07.440Z",
+    "fresh_until": "2026-06-22T22:30:07.440Z",
+    "status": "fresh",
+    "mutation_id": "ralplan:2026-06-22T22:00:07.440Z",
+    "content_sha256": {
+      "algorithm": "sha256",
+      "value": "13d3dd41ba6534807b300d13e70a1f5d2e38afa3e7c2e2a6d105fe773ad344f1",
+      "covered_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/_session-019ef0b4-fff2-7000-a21f-b7364e71cadd/state/ralplan-state.json",
+      "computed_at": "2026-06-22T22:00:07.441Z"
+    }
+  },
+  "run_id": "019ef0b4-fff2-7000-a21f-b7364e71cadd",
+  "state_revision": 11
+}

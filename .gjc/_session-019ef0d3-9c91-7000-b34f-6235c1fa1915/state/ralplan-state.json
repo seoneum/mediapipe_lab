@@ -1,0 +1,26 @@
+{
+  "run_id": "019ef0d3-9c91-7000-b34f-6235c1fa1915",
+  "skill": "ralplan",
+  "active": true,
+  "current_phase": "architect",
+  "version": 2,
+  "updated_at": "2026-06-22T19:38:06.372Z",
+  "receipt": {
+    "version": 1,
+    "skill": "ralplan",
+    "owner": "gjc-runtime",
+    "command": "gjc ralplan persist-run-id",
+    "state_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/state/sessions/019ef0d3-9c91-7000-b34f-6235c1fa1915/skill-active-state.json",
+    "storage_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/state/sessions/019ef0d3-9c91-7000-b34f-6235c1fa1915/ralplan-state.json",
+    "mutated_at": "2026-06-22T19:38:06.372Z",
+    "fresh_until": "2026-06-22T20:08:06.372Z",
+    "status": "fresh",
+    "mutation_id": "ralplan:2026-06-22T19:38:06.372Z",
+    "content_sha256": {
+      "algorithm": "sha256",
+      "value": "cffa6084a50b89a4c9b2eec2faaa11a40faafc5afe2a81e90b307cdc0c94cf55",
+      "covered_path": "/Users/seoneum/ai/mediapipe_lab/.gjc/_session-019ef0d3-9c91-7000-b34f-6235c1fa1915/state/ralplan-state.json",
+      "computed_at": "2026-06-22T19:38:06.372Z"
+    }
+  }
+}
