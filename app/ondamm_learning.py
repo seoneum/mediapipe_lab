@@ -1,14 +1,25 @@
 from __future__ import annotations
+import hashlib
+import json
 
 from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 from ondamm_models import Dossier, unique_preserving_order, utc_now
+from ondamm_personalization import (
+    EventFeatureRow,
+    InsufficientEvidenceError,
+    PersonalizationModel,
+    TeacherLabel,
+    generate_recommendations,
+)
 
 __all__ = [
     "LearningStep",
     "LearningProgramPlan",
     "LearningRunSummary",
     "build_learning_program_plan",
+    "build_personalized_learning_program_plan",
     "build_learning_run_summary",
     "render_learning_program_markdown",
     "render_learning_run_summary_markdown",
@@ -42,6 +53,18 @@ class LearningProgramPlan:
     caregiver_input: str | None = None
     support_boundary_notice: str = SUPPORT_BOUNDARY_NOTICE
     local_record_guidance: str = LOCAL_RECORD_GUIDANCE
+    personalization_provenance: str = "baseline"
+    personalization_model_config_version: str | None = None
+    personalization_sample_count: int = 0
+    personalization_confidence: float | None = None
+    personalization_evidence_ids: tuple[str, ...] = ()
+    personalization_recommendations: tuple[str, ...] = ()
+    personalization_notice: str = (
+        "교사 승인 개인화 증거가 없어 기본 계획을 사용합니다. "
+        "Sensor data did not directly alter the plan."
+    )
+    personalization_manifest_digest: str | None = None
+    personalization_applied_manifest_digest: str | None = None
 
     @property
     def total_duration_seconds(self) -> int:
@@ -67,6 +90,26 @@ class LearningRunSummary:
 def _join_or_default(values: list[str], fallback: str) -> str:
     cleaned = unique_preserving_order(values)
     return ", ".join(cleaned[:3]) if cleaned else fallback
+
+
+def _personalization_applied_manifest_digest(recommendations: Sequence[Any]) -> str:
+    entries = [
+        {
+            "support_label": recommendation.support_label,
+            "evidence_ids": sorted(recommendation.evidence_ids),
+        }
+        for recommendation in recommendations
+    ]
+    canonical = json.dumps(
+        sorted(
+            entries,
+            key=lambda entry: (entry["support_label"], entry["evidence_ids"]),
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 
@@ -191,6 +234,173 @@ def build_learning_program_plan(
         caregiver_input=caregiver_note,
     )
 
+def build_personalized_learning_program_plan(
+    dossier: Dossier,
+    *,
+    goal: str,
+    event_summaries: Sequence[Mapping[str, Any]],
+    teacher_labels: Sequence[TeacherLabel] | Mapping[str, TeacherLabel],
+    target_person_id: str,
+    teacher_approved: bool,
+    caregiver_input: str | None = None,
+    created_at: str | None = None,
+) -> LearningProgramPlan:
+    """Build a baseline plan and append only bounded, approved support hints."""
+
+    baseline = build_learning_program_plan(
+        dossier,
+        goal=goal,
+        caregiver_input=caregiver_input,
+        created_at=created_at,
+    )
+    abstention_notice = (
+        "개인화 근거가 충분하지 않거나 대상과 일치하지 않아 기본 계획을 유지합니다. "
+        "Sensor data did not directly alter the plan."
+    )
+    if not isinstance(target_person_id, str) or not target_person_id.strip():
+        baseline.personalization_notice = abstention_notice
+        return baseline
+    normalized_target_person_id = target_person_id.strip()
+    if teacher_approved is not True or normalized_target_person_id != dossier.child_id:
+        baseline.personalization_notice = abstention_notice
+        return baseline
+
+    try:
+        rows = tuple(EventFeatureRow.from_summary(summary) for summary in event_summaries)
+    except (TypeError, ValueError, RecursionError):
+        baseline.personalization_notice = abstention_notice
+        return baseline
+    row_ids = [row.event_id for row in rows]
+    if len(set(row_ids)) != len(row_ids):
+        raise ValueError("rows contain duplicate event_id values")
+    try:
+        if isinstance(teacher_labels, Mapping):
+            if any(
+                not isinstance(key, str)
+                or not isinstance(label, TeacherLabel)
+                or key != label.event_id
+                for key, label in teacher_labels.items()
+            ):
+                raise ValueError("label mapping key must equal label.event_id")
+            labels = tuple(teacher_labels.values())
+        else:
+            labels = tuple(teacher_labels)
+            if any(not isinstance(label, TeacherLabel) for label in labels):
+                raise ValueError("labels must contain TeacherLabel values")
+    except (TypeError, ValueError, RecursionError):
+        baseline.personalization_notice = abstention_notice
+        return baseline
+    try:
+        model = PersonalizationModel.fit(
+            rows,
+            labels,
+            target_person_id=normalized_target_person_id,
+        )
+    except InsufficientEvidenceError:
+        baseline.personalization_notice = abstention_notice
+        return baseline
+
+    predictions = tuple(
+        prediction
+        for row in sorted(rows, key=lambda item: item.event_id)
+        if (prediction := model.predict(row)) is not None
+    )
+    if not predictions:
+        baseline.personalization_notice = abstention_notice
+        return baseline
+
+    predictions_by_label: dict[str, list[Any]] = {}
+    for prediction in predictions:
+        predictions_by_label.setdefault(prediction.support_label, []).append(prediction)
+    candidates = []
+    for support_label, label_predictions in predictions_by_label.items():
+        authorized_predictions = tuple(
+            item
+            for item in label_predictions
+            if item._recommendation_authorization is not None
+        )
+        if not authorized_predictions:
+            continue
+        evidence_ids = tuple(
+            sorted({item.evidence_ids[0] for item in authorized_predictions})
+        )
+        best = max(
+            authorized_predictions,
+            key=lambda item: (item.confidence, item.sample_count, item.evidence_ids[0]),
+        )
+        candidate = generate_recommendations(
+            best,
+            teacher_approved=True,
+            evidence_ids=evidence_ids,
+        )
+        if candidate:
+            candidates.append((best.confidence, len(authorized_predictions), support_label, candidate[0]))
+    candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    recommendations = [item[3] for item in candidates[:3]]
+    if not recommendations:
+        baseline.personalization_notice = abstention_notice
+        return baseline
+
+    hint_targets = {
+        "visual_schedule": "prompt_hint",
+        "short_prompt": "prompt_hint",
+        "transition_preview": "transition_hint",
+        "brief_break": "transition_hint",
+        "reinforcement": "reinforcement_hint",
+    }
+    updated_steps = []
+    for step in baseline.steps:
+        values = {
+            "title": step.title,
+            "activity_focus": step.activity_focus,
+            "prompt_hint": step.prompt_hint,
+            "reinforcement_hint": step.reinforcement_hint,
+            "transition_hint": step.transition_hint,
+            "duration_seconds": step.duration_seconds,
+        }
+        for recommendation in recommendations:
+            field = hint_targets[recommendation.support_label]
+            values[field] = f"{values[field]} {recommendation.hint}"
+        updated_steps.append(LearningStep(**values))
+
+    baseline.steps = updated_steps
+    baseline.personalization_provenance = "teacher_approved_personalization"
+    baseline.personalization_model_config_version = model.model_config_version
+    baseline.personalization_manifest_digest = model.approved_manifest_digest
+    baseline.personalization_applied_manifest_digest = _personalization_applied_manifest_digest(
+        recommendations
+    )
+    retained_labels = {recommendation.support_label for recommendation in recommendations}
+    retained_predictions = tuple(
+        prediction
+        for prediction in predictions
+        if prediction.support_label in retained_labels
+        and prediction._recommendation_authorization is not None
+    )
+    retained_evidence_ids = tuple(
+        sorted(
+            {
+                evidence_id
+                for recommendation in recommendations
+                for evidence_id in recommendation.evidence_ids
+            }
+        )
+    )
+    baseline.personalization_sample_count = len(retained_evidence_ids)
+    baseline.personalization_confidence = round(
+        sum(prediction.confidence for prediction in retained_predictions) / len(retained_predictions),
+        6,
+    )
+    baseline.personalization_evidence_ids = retained_evidence_ids
+    baseline.personalization_recommendations = tuple(
+        recommendation.support_label for recommendation in recommendations
+    )
+    baseline.personalization_notice = (
+        "교사 승인된 제한적 지원 힌트만 기존 계획 문구에 추가했습니다. "
+        "Sensor data did not directly alter the plan."
+    )
+    return baseline
+
 
 
 def build_learning_run_summary(
@@ -235,6 +445,17 @@ def render_learning_program_markdown(plan: LearningProgramPlan) -> str:
         f"- caregiver_input: {plan.caregiver_input or '추가 메모 없음'}",
         f"- planned_steps: {len(plan.steps)}",
         f"- total_duration_seconds: {plan.total_duration_seconds}",
+        "## Teacher-approved personalization evidence",
+        f"- provenance: {plan.personalization_provenance}",
+        f"- model_config_version: {plan.personalization_model_config_version or '미사용'}",
+        f"- personalization_manifest_digest: {plan.personalization_manifest_digest or '미사용'}",
+        f"- personalization_applied_manifest_digest: {plan.personalization_applied_manifest_digest or '미사용'}",
+        f"- sample_count: {plan.personalization_sample_count}",
+        f"- confidence: {plan.personalization_confidence if plan.personalization_confidence is not None else '미사용'}",
+        f"- evidence_ids: {', '.join(plan.personalization_evidence_ids) or '없음'}",
+        f"- recommendations: {', '.join(plan.personalization_recommendations) or '없음'}",
+        f"- notice: {plan.personalization_notice}",
+        "- Sensor data did not directly alter the plan.",
         "",
         "## Ordered steps",
     ]

@@ -162,6 +162,7 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
                 pose_present=pose_landmarks is not None,
                 gaze_zone=gaze_zone,
                 posture_proxy=posture_proxy,
+                expression_label=expression_label,
             )
             if not args.headless:
                 preview = frame.copy()

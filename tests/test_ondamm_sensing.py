@@ -54,6 +54,30 @@ class OnDammSensingTests(unittest.TestCase):
         self.assertIn("해석하지 말고", note_text)
         self.assertIn("보조 메모 초안", note_text)
 
+    def test_expression_labels_are_counted_as_movement_hints_not_emotions(self) -> None:
+        tally = ObservationTally()
+        for label in ["smile", "smile", "neutral", None]:
+            tally.add_frame(
+                face_present=True,
+                pose_present=True,
+                gaze_zone="center",
+                posture_proxy="centered",
+                expression_label=label,
+            )
+
+        draft = build_sensing_draft(
+            child_id="child-expression",
+            local_session_id="sensing-expression",
+            duration_seconds=4.0,
+            tally=tally,
+        )
+
+        self.assertEqual(draft.expression_label_counts, {"neutral": 1, "smile": 2})
+        note_text = " ".join(draft.reviewed_note_draft)
+        self.assertIn("표정 움직임 힌트", note_text)
+        self.assertIn("감정 상태로 확정하지", note_text)
+        self.assertNotIn("행복", note_text)
+
 
 if __name__ == "__main__":
     unittest.main()

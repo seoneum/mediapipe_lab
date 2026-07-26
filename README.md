@@ -48,6 +48,34 @@ bash scripts/package_versions.sh
 
 이 저장소는 이제 MediaPipe 실습 코드 위에 **ON DAMM 개인맞춤 학습지원 MVP**를 함께 담고 있습니다.
 
+### 웹 UI 실행
+
+명령어 대신 로컬 웹 화면에서 지원 기록철, 승인 수업 기록, 활동 추천 초안/승인, 학습 프로그램 미리보기, 관찰 보조 데모 초안, 서명된 인수인계를 사용할 수 있습니다.
+
+```bash
+bash scripts/ondamm_web.sh
+```
+
+브라우저에서 `http://127.0.0.1:8765`를 엽니다. 다른 포트는 `bash scripts/ondamm_web.sh --port 9000`처럼 지정할 수 있습니다.
+
+- 서버는 기본적으로 `127.0.0.1`에만 바인딩됩니다.
+- 기존 `data/ondamm/dossiers/` JSON을 그대로 사용합니다.
+- 추천과 관찰 결과는 승인 전까지 공식 기록철에 자동 저장되지 않습니다.
+- 실제 카메라 미리보기는 기존 `scripts/ondamm_sensing.sh` 경로를 유지합니다.
+- `outputs/ondamm/**/event_recording.json`에 연결된 MP4는 관찰 보조 화면에서 로컬 재생됩니다.
+- Google MediaPipe 분석은 선택 영상의 샘플 프레임을 이 Mac 안에서 처리하고, 얼굴 blendshape를 감정이 아닌 **표정 움직임 힌트**로만 표시합니다.
+- GPT 검토는 선택 사항입니다. 전체 MP4가 아니라 최대 3장의 축소 JPEG 프레임만, UI에서 매번 명시적으로 동의한 경우에 OpenAI Responses API로 전송합니다.
+
+GPT 검토를 사용할 때만 서버 실행 전에 키를 환경 변수로 전달합니다. 키를 소스나 브라우저에 입력하지 마세요.
+
+```bash
+export OPENAI_API_KEY='your-api-key'
+export ONDAMM_GPT_MODEL='gpt-5.6'  # 생략 시 gpt-5.6
+bash scripts/ondamm_web.sh
+```
+
+키가 없으면 로컬 영상 재생과 MediaPipe 분석은 그대로 작동하고 GPT 버튼만 비활성 상태로 표시됩니다. GPT 결과도 비권위 초안이며 공식 기록철에 자동 저장되지 않습니다.
+
 핵심 원칙:
 - 진단 도구가 아닙니다.
 - 센서는 보조 신호일 뿐입니다.
@@ -148,6 +176,9 @@ bash scripts/ondamm_learning.sh \
 - learning plan / run summary / manifest: `outputs/ondamm/artifacts/...`
 - event clip outputs when `--record-events`: `<output-dir>/event-clips/`
 
+### 2-1B. 얼굴 신호 이벤트화·개인화 계획
+
+구현 현황과 후속 안전 경계는 [`docs/ON DAMM 얼굴 신호 이벤트화 계획.md`](docs/ON%20DAMM%20얼굴%20신호%20이벤트화%20계획.md)에 정리되어 있습니다.
 ## 2-2. ON DAMM sensing assist
 
 Option C는 **baseline dossier를 대체하지 않는 보조 lane**입니다.

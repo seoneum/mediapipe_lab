@@ -23,6 +23,7 @@ class ObservationTally:
     pose_present_frames: int = 0
     gaze_zone_counts: Counter[str] = field(default_factory=Counter)
     posture_proxy_counts: Counter[str] = field(default_factory=Counter)
+    expression_label_counts: Counter[str] = field(default_factory=Counter)
 
     def add_frame(
         self,
@@ -31,6 +32,7 @@ class ObservationTally:
         pose_present: bool,
         gaze_zone: str,
         posture_proxy: str,
+        expression_label: str | None = None,
     ) -> None:
         self.frame_count += 1
         if face_present:
@@ -39,6 +41,8 @@ class ObservationTally:
             self.pose_present_frames += 1
         self.gaze_zone_counts[gaze_zone] += 1
         self.posture_proxy_counts[posture_proxy] += 1
+        if expression_label:
+            self.expression_label_counts[expression_label] += 1
 
 
 @dataclass
@@ -51,6 +55,7 @@ class SensingDraft:
     pose_present_ratio: float
     gaze_zone_counts: dict[str, int]
     posture_proxy_counts: dict[str, int]
+    expression_label_counts: dict[str, int]
     optional_audio_presence_note: str | None
     reviewed_note_draft: list[str]
     non_authoritative_notice: str
@@ -67,6 +72,7 @@ class SensingDraft:
             "pose_present_ratio": self.pose_present_ratio,
             "gaze_zone_counts": self.gaze_zone_counts,
             "posture_proxy_counts": self.posture_proxy_counts,
+            "expression_label_counts": self.expression_label_counts,
             "optional_audio_presence_note": self.optional_audio_presence_note,
             "reviewed_note_draft": self.reviewed_note_draft,
             "non_authoritative_notice": self.non_authoritative_notice,
@@ -87,6 +93,7 @@ def build_reviewed_note_draft(
     pose_present_ratio: float,
     gaze_zone_counts: dict[str, int],
     posture_proxy_counts: dict[str, int],
+    expression_label_counts: dict[str, int],
     optional_audio_presence_note: str | None,
 ) -> list[str]:
     dominant_gaze = dominant_key(gaze_zone_counts, "unknown")
@@ -97,6 +104,12 @@ def build_reviewed_note_draft(
         f"가장 자주 관찰된 시선 구역은 `{dominant_gaze}` 이고, 자세 proxy는 `{dominant_posture}` 경향이었습니다.",
         "이 결과를 집중도/순응도/진단 점수로 해석하지 말고, 다음 활동 설계의 참고 메모로만 사용하세요.",
     ]
+    if expression_label_counts:
+        dominant_expression = dominant_key(expression_label_counts, "unavailable")
+        lines.append(
+            f"MediaPipe 표정 움직임 힌트는 `{dominant_expression}` 계열이 가장 자주 표시되었습니다. "
+            "이는 얼굴 blendshape의 대략적 움직임 표시일 뿐 감정 상태로 확정하지 마세요."
+        )
     if optional_audio_presence_note:
         lines.append(f"선택적 오디오 관찰 메모: {optional_audio_presence_note.strip()}")
     return lines
@@ -114,11 +127,13 @@ def build_sensing_draft(
     pose_present_ratio = safe_ratio(tally.pose_present_frames, tally.frame_count)
     gaze_zone_counts = dict(sorted(tally.gaze_zone_counts.items()))
     posture_proxy_counts = dict(sorted(tally.posture_proxy_counts.items()))
+    expression_label_counts = dict(sorted(tally.expression_label_counts.items()))
     reviewed_note_draft = build_reviewed_note_draft(
         face_present_ratio=face_present_ratio,
         pose_present_ratio=pose_present_ratio,
         gaze_zone_counts=gaze_zone_counts,
         posture_proxy_counts=posture_proxy_counts,
+        expression_label_counts=expression_label_counts,
         optional_audio_presence_note=optional_audio_presence_note,
     )
     return SensingDraft(
@@ -130,6 +145,7 @@ def build_sensing_draft(
         pose_present_ratio=pose_present_ratio,
         gaze_zone_counts=gaze_zone_counts,
         posture_proxy_counts=posture_proxy_counts,
+        expression_label_counts=expression_label_counts,
         optional_audio_presence_note=optional_audio_presence_note.strip() if optional_audio_presence_note else None,
         reviewed_note_draft=reviewed_note_draft,
         non_authoritative_notice="센서 출력은 non-authoritative draft이며 dossier에 자동 저장되지 않습니다.",
