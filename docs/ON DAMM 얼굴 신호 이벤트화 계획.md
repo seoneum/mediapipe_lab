@@ -174,21 +174,21 @@ MediaPipe의 연속 랜드마크를 저장하지 않고 다음 제한된 이벤�
 
 지원전략을 `s`라고 하고, 승인된 후보들의 feature vector를 `x_1, ..., x_n`이라 하면 prototype은 성분별 평균이다.
 
-\[
+$$
 p_s = \frac{1}{n}\sum_{i=1}^{n}x_i
-\]
+$$
 
 새 후보 `x`와 prototype의 유클리드 거리는 다음과 같다.
 
-\[
+$$
 d(x,p_s)=\sqrt{\sum_j(x_j-p_{s,j})^2}
-\]
+$$
 
 현재 baseline confidence는 bounded heuristic이다.
 
-\[
+$$
 confidence = \max(0, 1-\frac{d}{2})
-\]
+$$
 
 가장 가까운 전략을 고르되 `confidence <= 0.70`이면 결과를 내지 않는다. 이것은 “전략이 정답”이라는 뜻이 아니라 **검토 우선순위를 정하는 후보 점수**다.
 
