@@ -5,3 +5,14 @@ __pycache__/
 .DS_Store
 outputs/
 
+# Local package caches
+.pip-cache/
+
+# Editor and agent session state
+.idea/
+.vscode/
+.gjc/
+
+# Private runtime credentials
+data/ondamm/secrets/
+*.key
