@@ -12,3 +12,12 @@ matplotlib
 
 # 오디오 실험을 확장할 때 사용할 패키지
 soundfile
+
+# --- ON DAMM video analyzer ---
+# 아래 핀은 기존 핀을 변경하지 않는 추가(additive) 섹션이다.
+torch>=2.7,<2.14
+ultralytics>=8.4,<9
+insightface==0.7.3
+emotiefflib[torch]>=1.1,<2
+opencv-python>=4.10,<5
+scikit-learn>=1.4
