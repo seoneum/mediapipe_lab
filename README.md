@@ -318,3 +318,98 @@ bash scripts/ondamm_mvp.sh withdraw-dossier \
 
 MediaPipe Tasks는 CPU inference를 선택해도 macOS GL/Metal 컨텍스트를 만들 수 있습니다.
 따라서 카메라 앱과 설치 검증은 제한된 샌드박스보다 일반 Terminal 또는 PyCharm에서 실행하는 편이 안정적입니다.
+
+## ON DAMM 영상 분석기 (offline video analyzer)
+
+영상 파일 하나를 넣으면, 그 안의 사람마다 고유 ID가 유지된 채 집중 시간, 흥미도, 표정(8종 + 감정가/각성)이 한글 자막으로 새겨진 결과 영상과 개인별 지표 파일(JSON/CSV)을 만들어 줍니다. 웹캠 실시간 처리가 아니라 오프라인 파일 처리만 하고, 추론 시점에는 클라우드 API를 쓰지 않습니다. 모든 처리는 이 Mac 안에서 끝납니다.
+
+### 빠른 시작 (macOS)
+
+```bash
+cd /Users/seoneum/ai/mediapipe_lab
+bash scripts/setup_env.sh
+bash scripts/download_video_models.sh
+.venv/bin/python -m app.ondamm_video_env --check
+```
+
+`--check`는 임포트, ffmpeg 존재, 모델 파일, MPS 사용 가능 여부를 검증하고 결과를 `outputs/ondamm/video/env_report.json`에 기록합니다. MPS fp32 검증에서 허용 오차(로그잇 최대 절대 오차 1e-3)를 넘기면 기본 장치가 CPU로 기록되고, 분석기도 그 값을 따릅니다.
+
+### 분석 CLI
+
+CLI 구현은 `app/ondamm_video_analyzer_cli.py`이고, 셸 wrapper는 `scripts/ondamm_video_analyzer.sh`입니다.
+
+```bash
+bash scripts/ondamm_video_analyzer.sh \
+  --input input.mp4 \
+  --output outputs/ondamm/video/result.mp4 \
+  --device auto \
+  --sample-every 3 \
+  --metrics-json outputs/ondamm/video/metrics.json \
+  --metrics-csv outputs/ondamm/video/metrics.csv
+```
+
+wrapper 없이 직접 실행할 수도 있습니다.
+
+```bash
+.venv/bin/python -m app.ondamm_video_analyzer_cli \
+  --input input.mp4 \
+  --output outputs/ondamm/video/result.mp4
+```
+
+| 플래그 | 의미 |
+| --- | --- |
+| `--input PATH` | 입력 영상 파일. 열지 못하면 종료 코드 2 |
+| `--output PATH` | 자막이 새겨진 결과 MP4 저장 경로 |
+| `--device {auto,cpu,mps,cuda}` | 연산 장치. `auto`는 환경에서 감지된 최적 장치를 고릅니다 |
+| `--sample-every N` | N 프레임마다 얼굴 신호를 샘플링합니다. 기본값은 3 |
+| `--metrics-json PATH` | 개인별 지표 JSON 출력 경로 |
+| `--metrics-csv PATH` | 개인별 지표 CSV 출력 경로 |
+
+종료 코드:
+- `0`: 성공
+- `2`: 입력 영상 열기 실패
+- `3`: 모델 파일 없음. `bash scripts/download_video_models.sh`를 먼저 실행하세요.
+- `4`: 렌더 실패. 대부분 ffmpeg 부재입니다. macOS는 `brew install ffmpeg`, Ubuntu는 `sudo apt install ffmpeg`.
+
+### 결과물
+
+모든 산출물은 `outputs/ondamm/video/` 아래에 모입니다.
+
+결과 MP4:
+- 사람마다 색 있는 박스와 `{global_id} · 집중 {attention_pct}% · 흥미 {interest} · {dominant expression}` 라벨이 붙습니다.
+- 모든 프레임 하단에 반투명 자막 **행동 프록시 추정 결과이며 의학적·교육적 진단이 아닙니다**가 새겨집니다(burned-in). 이 문구는 결과 영상과 함께 움직입니다. 영상만 공유해도 비진단 문구가 빠지지 않습니다.
+
+지표 JSON/CSV는 사람별로 한 행(객체)씩 기록됩니다. 필드는 PersonMetrics 스키마로 고정되어 있습니다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `global_id` | ArcFace 임베딩 재연관으로 유지되는 개인 고유 ID |
+| `attention_pct` | 집중 비율(0~100) |
+| `focus_seconds` | 누적 집중 초 |
+| `interest` | 흥미도 수준. `낮음` / `중간` / `높음` |
+| `expression_timeline` | `{t_sec, label}` 목록. 시간별 표정 타임라인 |
+| `frames_covered` | 얼굴 신호가 덮인 프레임 수 |
+| `total_frames` | 영상 전체 프레임 수 |
+| `low_confidence` | 신원 확신이 낮으면 `true` |
+
+### unknown_N 표기의 의미
+
+얼굴을 볼 수 없거나 임베딩이 애매해서 기존 개인 ID에 묶을 수 없는(low-confidence) 사람은 `unknown_1`, `unknown_2` 같은 임시 ID로 표기되고 `low_confidence=true`가 함께 기록됩니다. 이후 프레임에서 확신 기준(코사인 유사도와 마진)을 넘으면 같은 사람이 원래 ID로 다시 묶일 수 있습니다. unknown_N은 실패 표시가 아니라 "아직 확신 없음"이라는 상태의 정직한 표시입니다.
+
+### 처리 속도 참고치
+
+60초 1080p/30fps 클립 하나를 M 시리즈 Mac 노트북(CPU 또는 MPS)에서 끝까지 처리하는 데 약 10분 안쪽이 걸립니다. 영상 길이, 사람 수, `--sample-every` 값에 따라 달라집니다.
+
+### 캘리브레이션
+
+data/calib 구조 안내는 캘리브레이션 워커 산출물 문서 참조.
+
+## 라이선스 고지 (NOTICE)
+
+이 프로젝트는 사전학습 모델과 외부 라이브러리를 조합합니다. 각 구성요소의 라이선스와 배포 조건은 다음과 같습니다.
+
+- **ultralytics (YOLO26)**: AGPL-3.0으로 배포됩니다. 학술 목적으로 본 프로젝트의 결과물을 배포할 때는 ultralytics의 AGPL-3.0 내용을 명시하고 해당 소스 링크(https://github.com/ultralytics/ultralytics )를 함께 제공해야 합니다.
+- **insightface buffalo_l**: insightface 코드 자체는 MIT입니다. 그러나 buffalo_l 사전학습 가중치는 비상업 연구(non-commercial research purposes only) 전용 약관으로 배포됩니다. 상업적 용도로는 가중치를 사용할 수 없습니다.
+- **MediaPipe**: Apache-2.0. Copyright The MediaPipe Authors.
+- **EmotiEffLib 및 HSEmotion 계열**: Apache-2.0 표기를 따릅니다.
+- **포함되지 않은 프로젝트**: LibreFace(USC academic license)와 sixdrepnet은 이 프로젝트에 포함되어 있지 않습니다. 문헌 검토 단계에서 비교한 백업 후보였을 뿐, 의존성으로 넣지 않았습니다.
