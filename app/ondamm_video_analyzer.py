@@ -30,7 +30,7 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterable, Iterator
 
 import cv2
 import numpy as np
@@ -39,9 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "app") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "app"))
 
-import ondamm_video_env  # noqa: E402  (repo convention: flat import via app/ on sys.path)
 import ondamm_video_metrics as metrics_mod  # noqa: E402
-import ondamm_video_render as render_mod  # noqa: E402
 from ondamm_video_face_signals import (  # noqa: E402
     EmotionSignals,
     FaceSignalExtractor,
@@ -61,6 +59,8 @@ DOWNLOAD_SCRIPT_HINT = "scripts/download_video_models.sh"
 DEFAULT_WEIGHTS = "models/yolo26s.pt"
 DEFAULT_LANDMARKER = "models/face_landmarker.task"
 VALID_DEVICES = ("auto", "cpu", "mps", "cuda")
+# 라이브 라벨 러닝 재계산 스로틀: gid별 새 샘플 N개마다 1회만 summarize_person 실행.
+LIVE_RECOMPUTE_EVERY = 10
 
 
 class ModelMissingError(RuntimeError):
@@ -111,6 +111,7 @@ def _annotated_frames(
     """한 프레임씩 처리해 주석 프레임을 yield하는 제너레이터(스트리밍, 무대량버퍼)."""
     running_metrics: dict[str, PersonMetrics] = {}
     fallback_expr: dict[str, str] = {}
+    pending_since_recompute: dict[str, int] = {}
     sample_every = max(1, int(getattr(extractor, "sample_every", 1)))
 
     for frame_idx, ts_sec, frame in reader:
@@ -133,15 +134,22 @@ def _annotated_frames(
                 if probs and labels:
                     fallback_expr[gid] = argmax_expression(labels, probs)
 
-        # 라이브 라벨용 러닝 추정치: 새 샘플이 들어온 프레임에서만 재계산(O(n²) 회피).
+        # 라이브 라벨용 러닝 추정치: 부분 창 재계산은 샘플당 O(n)이라 누적 O(n²) —
+        # 라이브 라벨 한정 스로틀로 완화(gid별 새 샘플 LIVE_RECOMPUTE_EVERY개마다 1회,
+        # 첫 샘플은 즉시 계산). 스로틀 사이 그리기는 마지막 캐시값을 쓴다. 최종
+        # JSON/CSV는 루프 종료 후 전체 윈도우로 1회 계산하므로 정확성은 영향 없음.
         for gid in new_samples:
-            running_metrics[gid] = summarize_person(
-                gid,
-                state.samples_by_gid[gid],
-                total_frames=frame_idx + 1,  # 러닝 추정치(최종값은 루프 종료 후)
-                fps=reader.fps,
-                low_confidence=state.low_confidence_by_gid.get(gid, False),
-            )
+            pending = pending_since_recompute.get(gid, 0) + 1
+            if pending >= LIVE_RECOMPUTE_EVERY or gid not in running_metrics:
+                running_metrics[gid] = summarize_person(
+                    gid,
+                    state.samples_by_gid[gid],
+                    total_frames=frame_idx + 1,  # 러닝 추정치(최종값은 루프 종료 후)
+                    fps=reader.fps,
+                    low_confidence=state.low_confidence_by_gid.get(gid, False),
+                )
+                pending = 0
+            pending_since_recompute[gid] = pending
 
         annotated = draw_overlays(
             frame,
@@ -201,13 +209,20 @@ def finalize_metrics(state: _PassState, fps: float) -> list[PersonMetrics]:
     return final
 
 
-def build_real_pipeline(device: str) -> tuple[PersonTracker, FaceSignalExtractor]:
-    """실모델 파이프라인 구성(YOLO26+BoT-SORT+ArcFace / MediaPipe+EmotiEffLib)."""
+def build_real_pipeline(
+    device: str, sample_every: int = 3
+) -> tuple[PersonTracker, FaceSignalExtractor]:
+    """실모델 파이프라인 구성(YOLO26+BoT-SORT+ArcFace / MediaPipe+EmotiEffLib).
+
+    ``sample_every`` 는 CLI ``--sample-every`` 값이며 FaceSignalExtractor까지
+    그대로 전달된다(생략 시 종전 기본값 3 유지).
+    """
     tracker = PersonTracker(device=device, embedder=FaceEmbedder())
     extractor = FaceSignalExtractor(
         device=device,
         landmarker=MediaPipeSignals(DEFAULT_LANDMARKER),
         emotions=EmotionSignals(device=device),
+        sample_every=int(sample_every),
     )
     return tracker, extractor
 
@@ -250,7 +265,9 @@ def run(
                 )
         device = resolve_device(device_arg)
         if tracker is None or extractor is None:
-            real_tracker, real_extractor = build_real_pipeline(device)
+            real_tracker, real_extractor = build_real_pipeline(
+                device, sample_every=sample_every
+            )
             tracker = tracker if tracker is not None else real_tracker
             extractor = extractor if extractor is not None else real_extractor
 

@@ -83,7 +83,7 @@ bash scripts/ondamm_video_analyzer.sh \
 ```
 
 장치 선택 참고:
-- `--device cuda`: CUDA GPU가 있을 때 사용합니다.
-- `--device mps`: Apple Silicon 전용입니다. Linux에는 MPS가 없으므로 MPS 전용 코드 경로는 자동으로 CPU 또는 CUDA로 폴백(fallback)됩니다. 별도 설정이 필요 없습니다.
-- `--device auto`: 감지된 환경 기준으로 최적 장치를 고릅니다. Ubuntu + CUDA GPU라면 cuda, 아니면 cpu입니다.
+- `--device cuda`: CUDA GPU가 있을 때 사용합니다. Ubuntu + CUDA GPU에서는 이 값을 반드시 직접 지정하세요. `auto`는 절대 cuda를 자동 선택하지 않습니다.
+- `--device mps`: Apple Silicon 전용입니다. 명시한 장치값은 폴백(fallback) 없이 그대로 전달되므로, Linux에서 mps를 지정하면 torch 수준에서 오류로 실패합니다.
+- `--device auto`: macOS에서 검증된 mps 또는 cpu 중 하나로만 해석됩니다. Ubuntu(CUDA GPU가 있어도)에서는 항상 cpu가 되므로, GPU를 쓰려면 `--device cuda`를 직접 지정하세요.
 - 종료 코드 체계(2 입력 실패 / 3 모델 없음 / 4 렌더 실패)도 README와 동일합니다.

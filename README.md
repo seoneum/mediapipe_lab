@@ -365,6 +365,8 @@ wrapper 없이 직접 실행할 수도 있습니다.
 | `--metrics-json PATH` | 개인별 지표 JSON 출력 경로 |
 | `--metrics-csv PATH` | 개인별 지표 CSV 출력 경로 |
 
+장치 참고: `auto`는 macOS에서 검증된 mps 또는 cpu 중 하나로만 자동 해석되며 절대 cuda를 고르지 않습니다. Ubuntu+CUDA에서는 `--device cuda`를 직접 지정하세요. 명시한 장치값은 폴백 없이 그대로 전달됩니다(mps는 macOS 전용).
+
 종료 코드:
 - `0`: 성공
 - `2`: 입력 영상 열기 실패

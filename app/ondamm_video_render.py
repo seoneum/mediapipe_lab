@@ -334,8 +334,13 @@ def encode(frames: Iterable[np.ndarray], out_path: str | Path, fps: float) -> Pa
             raise RenderError(FFMPEG_NOT_FOUND_MSG) from exc
         if proc.returncode != 0 or not out.is_file():
             detail = (proc.stderr or "").strip().splitlines()[-1:] or ["no stderr"]
+            try:
+                if out.exists():
+                    out.unlink()  # ffmpeg 실패 시 부분 출력 잔존 방지(stale-state 가드)
+            except OSError:
+                pass
             raise RenderError(
-                f"{FFMPEG_NOT_FOUND_MSG} (ffmpeg exited {proc.returncode}: {detail[0]})"
+                f"ffmpeg remux failed (rc={proc.returncode}): {detail[0]}"
             )
         return out
     finally:

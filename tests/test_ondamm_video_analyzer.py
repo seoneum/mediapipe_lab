@@ -258,11 +258,32 @@ def test_encode_ffmpeg_nonzero_rc_raises_rendererror(tmp_path, monkeypatch):
         assert any("ffmpeg" == part for part in cmd[:1])
         return FakeProc()
 
-    real_run = render_mod.subprocess.run
     monkeypatch.setattr(render_mod.subprocess, "run", fake_run)
     with pytest.raises(RenderError) as ctx:
         encode([np.zeros((60, 80, 3), np.uint8)], tmp_path / "v.mp4", 30.0)
-    assert "brew install ffmpeg" in str(ctx.value)
+    # nonzero rc는 "not found" 접두 없이 remux 실패로 정확히 진단해야 한다
+    assert "ffmpeg remux failed" in str(ctx.value)
+    assert "(rc=3)" in str(ctx.value)
+    assert "boom" in str(ctx.value)
+    assert "brew install ffmpeg" not in str(ctx.value)
+
+
+def test_encode_ffmpeg_failure_removes_partial_output(tmp_path, monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stderr = "muxing error near frame 12"
+
+    def fake_run(cmd, capture_output, text):
+        Path(cmd[-1]).write_bytes(b"partial-mp4-bytes")  # ffmpeg이 부분 출력 남긴 상황 재현
+        return FakeProc()
+
+    monkeypatch.setattr(render_mod.subprocess, "run", fake_run)
+    out = tmp_path / "v.mp4"
+    with pytest.raises(RenderError) as ctx:
+        encode([np.zeros((60, 80, 3), np.uint8)], out, 30.0)
+    assert "ffmpeg remux failed" in str(ctx.value)
+    assert not out.exists()  # stale partial artifact 제거
+    assert list(tmp_path.glob(".ondamm_render_*")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +418,97 @@ def test_missing_model_files_lists_assets(monkeypatch, tmp_path):
     assert any("yolo26s.pt" in m for m in missing)
     assert any("face_landmarker.task" in m for m in missing)
     assert any("buffalo_l" in m for m in missing)
+
+
+# ---------------------------------------------------------------------------
+# Real-pipeline builder wiring (B1 regression: --sample-every must reach it)
+# ---------------------------------------------------------------------------
+
+
+def test_build_real_pipeline_forwards_sample_every_to_extractor(monkeypatch):
+    """B1 회귀: build_real_pipeline의 sample_every가 FaceSignalExtractor 생성자까지 전달."""
+    recorded = {}
+
+    class FakeTracker:
+        def __init__(self, device=None, embedder=None) -> None:
+            recorded["tracker_device"] = device
+
+    class FakeExtractor:
+        def __init__(self, **kwargs) -> None:
+            recorded.update(kwargs)
+            self.sample_every = kwargs.get("sample_every")
+
+    monkeypatch.setattr(analyzer, "PersonTracker", FakeTracker)
+    monkeypatch.setattr(analyzer, "FaceEmbedder", lambda: object())
+    monkeypatch.setattr(analyzer, "MediaPipeSignals", lambda path: ("mediapipe", path))
+    monkeypatch.setattr(analyzer, "EmotionSignals", lambda device=None: ("emotions", device))
+    monkeypatch.setattr(analyzer, "FaceSignalExtractor", FakeExtractor)
+
+    _, extractor = analyzer.build_real_pipeline("cpu", sample_every=7)
+    assert isinstance(extractor, FakeExtractor)
+    assert recorded["sample_every"] == 7
+    assert extractor.sample_every == 7
+    assert recorded["device"] == "cpu"
+    assert recorded["tracker_device"] == "cpu"
+
+    # 기본값 계약 유지: 플래그 생략 시 종전과 동일하게 3
+    recorded.clear()
+    _, default_extractor = analyzer.build_real_pipeline("cpu")
+    assert recorded["sample_every"] == 3
+    assert default_extractor.sample_every == 3
+
+
+def test_run_forwards_parsed_sample_every_to_real_builder(tmp_path, monkeypatch):
+    """B1 회귀: run()이 파싱한 args.sample_every를 실파이프라인 빌더에 그대로 넘긴다."""
+    input_path = _write_synthetic_video(tmp_path / "in.mp4", frames=6, fps=30)
+    seen = {}
+
+    def fake_builder(device, sample_every=3):
+        seen["device"] = device
+        seen["sample_every"] = sample_every
+        return StubTracker([(GID_A, BBOX_A)]), StubExtractor(sample_every=sample_every)
+
+    monkeypatch.setattr(analyzer, "build_real_pipeline", fake_builder)
+    args = argparse_namespace(
+        input=str(input_path),
+        output=str(tmp_path / "out.mp4"),
+        device="cpu",
+        sample_every=7,
+        metrics_json=None,
+        metrics_csv=None,
+    )
+    code = analyzer.run(args, require_models=False)
+    assert code == 0
+    assert seen == {"device": "cpu", "sample_every": 7}
+
+
+def test_live_label_recompute_is_throttled(e2e_env, monkeypatch):
+    """M1 완화: 라이브 라벨 summarize_person 재계산이 gid당 스로틀 안쪽으로 제한."""
+    tmp_path, input_path, args, tracker, extractor = e2e_env
+    calls = {"n": 0}
+    real_summarize = analyzer.summarize_person
+
+    def counting_summarize(*a, **kw):
+        calls["n"] += 1
+        return real_summarize(*a, **kw)
+
+    monkeypatch.setattr(analyzer, "summarize_person", counting_summarize)
+    code = analyzer.run(args, tracker=tracker, extractor=extractor, require_models=False)
+    assert code == 0
+
+    # finalize_metrics는 gid별로 정확히 1회씩(=2) 전체 윈도우 재계산하므로 제외
+    final_calls = 2
+    live_calls = calls["n"] - final_calls
+    per_gid_samples = len(extractor.ts_seen) // 2  # 120프레임/sample_every=3 → gid당 40
+    bound = 2 * (per_gid_samples // analyzer.LIVE_RECOMPUTE_EVERY + 1)
+    assert live_calls <= bound
+    assert live_calls < 2 * per_gid_samples  # 스로틀이 없었다면 gid당 샘플 수만큼이었을 것
+
+    # 최종 JSON은 여전히 전체 윈도우 값(스로틀 영향 없음)
+    payload = json.loads(Path(args.metrics_json).read_text(encoding="utf-8"))
+    assert {entry["global_id"] for entry in payload} == {GID_A, GID_B}
+    for entry in payload:
+        assert 0.0 <= entry["attention_pct"] <= 100.0
 
 
 # ---------------------------------------------------------------------------

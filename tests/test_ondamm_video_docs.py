@@ -1,7 +1,10 @@
 """Hermetic documentation tests for the ON DAMM video analyzer docs (todo 7).
 
 These tests only read files inside the repository. No network access, no model
-loading, no imports of heavy app modules.
+loading, no imports of heavy app modules — with one documented exception:
+``UbuntuDocDeviceTruthTests`` imports ``app.ondamm_video_env`` solely to call
+its pure function ``compute_default_device`` (no model loads, no --check run)
+so the device-selection doc claims are checked against code truth (review M2).
 
 Parallel-wave design note: ``app/ondamm_video_analyzer_cli.py`` and
 ``scripts/ondamm_video_analyzer.sh`` are being built by todo 5 in parallel,
@@ -14,10 +17,14 @@ models/face_landmarker.task.
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = REPO_ROOT / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 README_PATH = REPO_ROOT / "README.md"
 UBUNTU_DOC_PATH = REPO_ROOT / "docs" / "ondamm-video-ubuntu22.md"
 ANALYZER_CLI_PATH = REPO_ROOT / "app" / "ondamm_video_analyzer_cli.py"
@@ -161,6 +168,30 @@ class UbuntuDocContentTests(unittest.TestCase):
         text = read_ubuntu_doc()
         self.assertIn("mps_available", text)
         self.assertIn("폴백(fallback)", text)
+
+
+class UbuntuDocDeviceTruthTests(unittest.TestCase):
+    """n6 보완: 문서 문자열 '존재'가 아니라 코드 '진실'과 대조(M2 회귀 방지)."""
+
+    def test_ubuntu_doc_guides_explicit_cuda_without_false_auto_cuda_claim(self) -> None:
+        text = read_ubuntu_doc()
+        self.assertIn("--device cuda", text)  # Ubuntu+CUDA는 명시 지정 안내 필수
+        # 거짓 주장 패턴(수정 전 원문): auto가 cuda를 고른다는 주장
+        self.assertNotIn("Ubuntu + CUDA GPU라면 cuda", text)
+        # 거짓 주장 패턴: mps가 CPU/CUDA로 자동 폴백한다는 주장
+        self.assertNotIn("자동으로 CPU 또는 CUDA로 폴백", text)
+
+    def test_readme_device_note_matches_auto_contract(self) -> None:
+        text = read_readme()
+        self.assertIn("절대 cuda를 고르지 않습니다", text)
+        self.assertIn("--device cuda", text)
+
+    def test_compute_default_device_is_binary_mps_or_cpu(self) -> None:
+        import ondamm_video_env  # noqa: E402  (순수 함수만 호출; 모델 로드 없음)
+
+        self.assertEqual(ondamm_video_env.compute_default_device(True, True), "mps")
+        self.assertEqual(ondamm_video_env.compute_default_device(False, True), "cpu")
+        self.assertEqual(ondamm_video_env.compute_default_device(False, False), "cpu")
 
 
 class AnalyzerEntrypointSoftCheckTests(unittest.TestCase):
