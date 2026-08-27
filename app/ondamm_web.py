@@ -18,7 +18,7 @@ from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
 from ondamm_models import Dossier, FacialMovementProfile, SessionSummary, unique_preserving_order
 from ondamm_recommendations import build_baseline_recommendation
-from ondamm_review import LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
+from ondamm_review import EventReviewStore, LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
 from ondamm_security import build_export_manifest
 from ondamm_sensing import ObservationTally, build_sensing_draft
 from ondamm_store import create_dossier, list_dossiers, load_dossier, save_dossier
@@ -74,11 +74,15 @@ class OndammWebService:
         self,
         *,
         clip_catalog: LocalClipCatalog | None = None,
+        event_review_store: EventReviewStore | None = None,
         clip_analyzer: Callable[[Path], dict[str, Any]] = analyze_clip_with_mediapipe,
         gpt_reviewer: Any | None = None,
         frame_extractor: Callable[[Path], list[str]] = extract_video_frame_data_urls,
     ) -> None:
         self.clip_catalog = clip_catalog or LocalClipCatalog(Path(ondamm_paths.ONDAMM_EXPORTS))
+        self.event_review_store = event_review_store or EventReviewStore(
+            Path(ondamm_paths.ONDAMM_EXPORTS) / "event-reviews"
+        )
         self.clip_analyzer = clip_analyzer
         self.frame_extractor = frame_extractor
         self._browser_media_cache: dict[str, Path] = {}
@@ -282,6 +286,29 @@ class OndammWebService:
         result["dossier_auto_updated"] = False
         return result
 
+    def get_event_reviews(self, child_id: str, clip_id: str) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "read local event reviews")
+        clip = self.clip_catalog.resolve_clip(clip_id, child_id=dossier.child_id)
+        return self.event_review_store.get_bundle(child_id=dossier.child_id, clip=clip)
+
+    def add_event_review(self, child_id: str, clip_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "add local event review")
+        clip = self.clip_catalog.resolve_clip(clip_id, child_id=dossier.child_id)
+        try:
+            return self.event_review_store.add_review(
+                child_id=dossier.child_id,
+                clip=clip,
+                reviewer_role=required_text(payload, "reviewer_role"),
+                reviewer_name=required_text(payload, "reviewer_name"),
+                decision=required_text(payload, "decision"),
+                observed_facts=required_text(payload, "observed_facts"),
+                context_comment=optional_text(payload, "context_comment"),
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
     def review_local_clip_with_gpt(
         self,
         child_id: str,
@@ -422,6 +449,11 @@ class ApiRouter:
                 return 200, self.service.analyze_local_clip(child_id, segments[4])
             if len(segments) == 6 and segments[3] == "clips" and segments[5] == "gpt-review" and method == "POST":
                 return 200, self.service.review_local_clip_with_gpt(child_id, segments[4], body)
+            if len(segments) == 6 and segments[3] == "clips" and segments[5] == "reviews":
+                if method == "GET":
+                    return 200, self.service.get_event_reviews(child_id, segments[4])
+                if method == "POST":
+                    return 201, self.service.add_event_review(child_id, segments[4], body)
             if len(segments) == 4 and segments[3] == "sessions" and method == "POST":
                 return 201, self.service.add_session(child_id, body)
             if len(segments) == 5 and segments[3:] == ["facial-movement-profiles", "approve"] and method == "POST":

@@ -7,8 +7,164 @@ import subprocess
 import threading
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
+
+
+REVIEWER_ROLES = ("guardian", "teacher", "institutional_social_worker")
+REVIEW_DECISIONS = ("accepted", "rejected", "uncertain")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_id(value: str, *, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > 80 or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in cleaned):
+        raise ValueError(f"{field_name} must contain only letters, numbers, '-' or '_'")
+    return cleaned
+
+
+class EventReviewStore:
+    """Append-only, local review records kept separate from the canonical dossier."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.expanduser().resolve()
+        self._lock = threading.Lock()
+
+    def get_bundle(self, *, child_id: str, clip: "LocalClip") -> dict[str, Any]:
+        path = self._path(child_id, clip.clip_id)
+        with self._lock:
+            payload = self._read(path) if path.is_file() else self._empty_bundle(child_id, clip)
+        return self._with_summary(payload)
+
+    def add_review(
+        self,
+        *,
+        child_id: str,
+        clip: "LocalClip",
+        reviewer_role: str,
+        reviewer_name: str,
+        decision: str,
+        observed_facts: str,
+        context_comment: str = "",
+    ) -> dict[str, Any]:
+        role = reviewer_role.strip()
+        if role not in REVIEWER_ROLES:
+            raise ValueError(f"reviewer_role must be one of: {', '.join(REVIEWER_ROLES)}")
+        normalized_decision = decision.strip()
+        if normalized_decision not in REVIEW_DECISIONS:
+            raise ValueError(f"decision must be one of: {', '.join(REVIEW_DECISIONS)}")
+        name = self._bounded_text(reviewer_name, field_name="reviewer_name", maximum=120)
+        facts = self._bounded_text(observed_facts, field_name="observed_facts", maximum=2_000)
+        comment = self._bounded_text(context_comment, field_name="context_comment", maximum=4_000, required=False)
+        path = self._path(child_id, clip.clip_id)
+
+        with self._lock:
+            payload = self._read(path) if path.is_file() else self._empty_bundle(child_id, clip)
+            if payload.get("event_id") != clip.event_id:
+                raise RuntimeError("review bundle event identity does not match the selected clip")
+            entries = payload.setdefault("reviews", [])
+            if len(entries) >= 200:
+                raise RuntimeError("review history limit reached for this event clip")
+            previous = next((item for item in reversed(entries) if item.get("reviewer_role") == role), None)
+            entries.append(
+                {
+                    "review_id": f"review-{uuid4().hex[:12]}",
+                    "reviewer_role": role,
+                    "reviewer_name": name,
+                    "decision": normalized_decision,
+                    "observed_facts": facts,
+                    "context_comment": comment,
+                    "supersedes_review_id": previous.get("review_id") if previous else None,
+                    "created_at": _utc_now(),
+                }
+            )
+            payload["revision"] = int(payload.get("revision", 0)) + 1
+            payload["updated_at"] = _utc_now()
+            self._write(path, payload)
+        return self._with_summary(payload)
+
+    def _path(self, child_id: str, clip_id: str) -> Path:
+        safe_child_id = _safe_id(child_id, field_name="child_id")
+        safe_clip_id = _safe_id(clip_id, field_name="clip_id")
+        return self.root / safe_child_id / f"{safe_clip_id}.json"
+
+    @staticmethod
+    def _bounded_text(value: str, *, field_name: str, maximum: int, required: bool = True) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{field_name} must be a string")
+        cleaned = value.strip()
+        if required and not cleaned:
+            raise ValueError(f"{field_name} is required")
+        if len(cleaned) > maximum:
+            raise ValueError(f"{field_name} must be at most {maximum} characters")
+        return cleaned
+
+    @staticmethod
+    def _empty_bundle(child_id: str, clip: "LocalClip") -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "child_id": child_id,
+            "clip_id": clip.clip_id,
+            "event_id": clip.event_id,
+            "event_type": clip.event_type,
+            "revision": 0,
+            "reviews": [],
+            "updated_at": None,
+            "dossier_auto_updated": False,
+        }
+
+    @staticmethod
+    def _read(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not read event review bundle: {path.name}") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("reviews"), list):
+            raise RuntimeError(f"invalid event review bundle: {path.name}")
+        return payload
+
+    @staticmethod
+    def _write(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+    @staticmethod
+    def _with_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        result = json.loads(json.dumps(payload, ensure_ascii=False))
+        latest_by_role: dict[str, dict[str, Any]] = {}
+        for entry in result.get("reviews", []):
+            role = entry.get("reviewer_role")
+            if role in REVIEWER_ROLES:
+                latest_by_role[role] = entry
+        pending_roles = [role for role in REVIEWER_ROLES if role not in latest_by_role]
+        decisions = [entry.get("decision") for entry in latest_by_role.values()]
+        if not latest_by_role:
+            status = "pending"
+        elif pending_roles:
+            status = "partially_reviewed"
+        elif "uncertain" in decisions:
+            status = "needs_context"
+        elif len(set(decisions)) == 1:
+            status = f"consensus_{decisions[0]}"
+        else:
+            status = "disagreement"
+        result["summary"] = {
+            "status": status,
+            "required_roles": list(REVIEWER_ROLES),
+            "completed_roles": [role for role in REVIEWER_ROLES if role in latest_by_role],
+            "pending_roles": pending_roles,
+            "latest_by_role": latest_by_role,
+            "ready_for_human_promotion": status == "consensus_accepted",
+            "promotion_requires_separate_approval": True,
+        }
+        return result
 
 
 @dataclass(frozen=True)
@@ -271,7 +427,7 @@ def analyze_video_frames(
             "expression_label_counts": dict(sorted(counts.items())),
             "dominant_expression_hint": dominant,
             "non_diagnostic_notice": (
-                "MediaPipe 얼굴 blendshape 기반 표정 움직임 힌트이며 감정 상태, 집중도, 진단으로 해석하지 않습니다."
+                "MediaPipe 얼굴 blendshape 기반 미세 움직임 힌트이며 감정 상태, 집중도, 진단으로 해석하지 않습니다."
             ),
             "dossier_auto_updated": False,
         }

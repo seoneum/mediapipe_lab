@@ -266,6 +266,7 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
     from mediapipe.tasks.python.vision import holistic_landmarker
 
     from holistic_camera import estimate_gaze
+    from ondamm_facial_movement import analyze_facial_movements, rules_from_approved_profiles
     from ondamm_sensing_cli import posture_proxy_from_landmarks
     from paths import HOLISTIC_MODEL, base_options
 
@@ -274,10 +275,12 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
     observations = ObservationAccumulator()
     detected_events: list[EventMetadata] = []
     recorded_events: list[EventMetadata] = []
+    dossier = load_dossier(args.child_id)
+    movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
     options = holistic_landmarker.HolisticLandmarkerOptions(
         base_options=base_options(HOLISTIC_MODEL),
         running_mode=vision.RunningMode.VIDEO,
-        output_face_blendshapes=False,
+        output_face_blendshapes=bool(args.movement_label),
         min_face_detection_confidence=0.5,
         min_face_landmarks_confidence=0.5,
         min_pose_detection_confidence=0.5,
@@ -309,6 +312,10 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
                 gaze_zone = gaze["direction"] if gaze else "unknown"
             posture_proxy = posture_proxy_from_landmarks(pose_landmarks) if pose_landmarks is not None else "unavailable"
             face_present = face_landmarks is not None
+            movement_labels: tuple[str, ...] = ()
+            if args.movement_label and result.face_blendshapes:
+                movement_analysis = analyze_facial_movements(result.face_blendshapes, rules=movement_rules)
+                movement_labels = tuple(movement_analysis.active_labels)
             observations.add(face_present=face_present, gaze_zone=gaze_zone, posture_proxy=posture_proxy)
             recorder.add_frame(frame=frame, timestamp=elapsed)
             detector_events = detector.add_observation(
@@ -317,6 +324,7 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
                     face_present=face_present,
                     gaze_zone=gaze_zone,
                     posture_proxy=posture_proxy,
+                    facial_movement_labels=movement_labels,
                 )
             )
             detected_events.extend(detector_events)
@@ -327,6 +335,8 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
                 cv2.putText(preview, f"face={face_present}", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
                 cv2.putText(preview, f"gaze={gaze_zone}", (16, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
                 cv2.putText(preview, f"posture={posture_proxy}", (16, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
+                if args.movement_label:
+                    cv2.putText(preview, f"movement={','.join(movement_labels) or 'none'}", (16, 128), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
                 cv2.imshow("ON DAMM learning", preview)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
@@ -450,6 +460,13 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--record-events", action="store_true")
+    parser.add_argument(
+        "--movement-label",
+        action="append",
+        default=[],
+        help="Approved facial movement label to auto-record; repeat for multiple labels",
+    )
+    parser.add_argument("--movement-min-seconds", type=float, default=0.4)
     parser.add_argument("--output-dir")
     parser.add_argument("--run-id")
     args = parser.parse_args()
@@ -458,8 +475,19 @@ def main() -> None:
         raise ValueError("--clip-fps must be positive")
     if args.duration_seconds <= 0:
         raise ValueError("--duration-seconds must be positive")
+    if args.movement_min_seconds <= 0:
+        raise ValueError("--movement-min-seconds must be positive")
 
     dossier = load_dossier(args.child_id)
+    if args.movement_label:
+        from ondamm_facial_movement import rules_from_approved_profiles
+
+        available_labels = {
+            rule.label for rule in rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
+        }
+        unknown_labels = sorted(set(args.movement_label) - available_labels)
+        if unknown_labels:
+            raise ValueError(f"Unknown --movement-label values: {', '.join(unknown_labels)}")
     plan = build_learning_program_plan(
         dossier,
         goal=args.goal,
@@ -469,7 +497,10 @@ def main() -> None:
     output_dir = resolve_output_dir(args, dossier)
     clips_dir = resolve_clips_dir(output_dir)
     prepare_output_dirs(output_dir, clips_dir, record_events=args.record_events)
-    policy = EventRecordingPolicy()
+    policy = EventRecordingPolicy(
+        facial_movement_min_seconds=args.movement_min_seconds,
+        target_facial_movement_labels=tuple(unique_preserving_order(args.movement_label)),
+    )
     recorder = LocalEventClipRecorder(policy=policy, output_dir=clips_dir, recording_enabled=args.record_events)
     detector = SustainedEventDetector(policy=policy)
     capture = run_demo_mode(args, recorder=recorder, detector=detector) if args.demo else run_camera_mode(args, recorder=recorder, detector=detector)

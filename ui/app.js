@@ -9,6 +9,7 @@ const state = {
   selectedClipId: null,
   clipAnalysis: null,
   gptReview: null,
+  eventReviews: null,
   clipBusy: null,
 };
 
@@ -109,6 +110,16 @@ async function loadLocalClips({ preserveSelection = true, silent = false } = {})
   }
 }
 
+async function loadEventReviews({ silent = false } = {}) {
+  state.eventReviews = null;
+  if (!state.current || !state.selectedClipId) return;
+  try {
+    state.eventReviews = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/clips/${encodeURIComponent(state.selectedClipId)}/reviews`);
+  } catch (error) {
+    if (!silent) toast(error.message, "error");
+  }
+}
+
 async function selectChild(childId) {
   state.current = await api(`/api/dossiers/${encodeURIComponent(childId)}`);
   localStorage.setItem("ondamm-selected-child", childId);
@@ -116,6 +127,7 @@ async function selectChild(childId) {
   state.recommendationDraft = null;
   state.clipAnalysis = null;
   state.gptReview = null;
+  state.eventReviews = null;
   state.clipBusy = null;
   if (!state.integrations) {
     state.integrations = await api("/api/integrations").catch(() => ({
@@ -123,6 +135,7 @@ async function selectChild(childId) {
     }));
   }
   await loadLocalClips({ preserveSelection: false, silent: true });
+  await loadEventReviews({ silent: true });
   renderChildList();
   renderCurrent();
   document.body.classList.remove("sidebar-open");
@@ -217,7 +230,7 @@ function renderPlans() {
 }
 
 function eventTypeName(value) {
-  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림" })[value] || value || "이벤트";
+  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림", facial_movement_detected: "지정 미세 움직임" })[value] || value || "이벤트";
 }
 
 function expressionHintName(value) {
@@ -250,6 +263,52 @@ function expressionHintName(value) {
   })[value] || value || "확인 불가";
 }
 
+function reviewRoleName(value) {
+  return ({ guardian: "보호자", teacher: "교사", institutional_social_worker: "기관 사회복지사" })[value] || value;
+}
+
+function reviewDecisionName(value) {
+  return ({ accepted: "의미 있는 움직임", rejected: "이벤트 아님", uncertain: "추가 맥락 필요" })[value] || value;
+}
+
+function reviewStatusName(value) {
+  return ({
+    pending: "검토 대기",
+    partially_reviewed: "일부 검토 완료",
+    needs_context: "추가 맥락 필요",
+    disagreement: "의견 불일치",
+    consensus_accepted: "3자 의견 일치 · 후보 유지",
+    consensus_rejected: "3자 의견 일치 · 제외 후보",
+  })[value] || value || "검토 대기";
+}
+
+function crossReviewMarkup() {
+  const bundle = state.eventReviews;
+  const summary = bundle?.summary || { status: "pending", latest_by_role: {}, pending_roles: ["guardian", "teacher", "institutional_social_worker"] };
+  const roles = ["guardian", "teacher", "institutional_social_worker"];
+  const roleCards = roles.map((role) => {
+    const entry = summary.latest_by_role?.[role];
+    return `<article class="role-review ${entry ? "complete" : "pending"}">
+      <div class="role-review-head"><strong>${escapeHtml(reviewRoleName(role))}</strong><span>${entry ? escapeHtml(reviewDecisionName(entry.decision)) : "대기"}</span></div>
+      ${entry ? `<p>${escapeHtml(entry.observed_facts)}</p>${entry.context_comment ? `<small>${escapeHtml(entry.context_comment)}</small>` : ""}<time>${escapeHtml(entry.reviewer_name)} · ${formatDate(entry.created_at, true)}</time>` : `<p>이 역할의 독립 검토가 아직 없습니다.</p>`}
+    </article>`;
+  }).join("");
+  return `<section class="card cross-review-panel">
+    <div class="cross-review-head"><div><p class="eyebrow">THREE-WAY CROSS REVIEW</p><h4>보호자 · 교사 · 기관 사회복지사 교차 검토</h4><p>각 역할이 먼저 독립 의견을 남깁니다. 일치 여부는 표시만 하며 기록철에는 자동 반영하지 않습니다.</p></div><span class="review-status status-${escapeHtml(summary.status)}">${escapeHtml(reviewStatusName(summary.status))}</span></div>
+    <div class="role-review-grid">${roleCards}</div>
+    <form id="event-review-form" class="event-review-form">
+      <div class="review-form-grid">
+        <label>검토 역할<select name="reviewer_role" required><option value="guardian">보호자</option><option value="teacher">교사</option><option value="institutional_social_worker">기관 사회복지사</option></select></label>
+        <label>검토자 이름<input name="reviewer_name" required maxlength="120" placeholder="예: 보호자 김OO"></label>
+        <label>판단<select name="decision" required><option value="accepted">의미 있는 움직임 후보</option><option value="rejected">이벤트 아님</option><option value="uncertain">추가 맥락 필요</option></select></label>
+      </div>
+      <label>영상에서 직접 확인한 사실<textarea name="observed_facts" required maxlength="2000" placeholder="감정 해석 없이, 언제 어떤 움직임이 보였는지 적습니다."></textarea></label>
+      <label>상황 맥락·코멘트<textarea name="context_comment" maxlength="4000" placeholder="활동, 장소, 직전 사건, 평소 패턴과의 차이 등을 적습니다."></textarea></label>
+      <div class="review-submit-row"><p>같은 역할이 다시 제출하면 이전 기록은 보존되고 최신 의견으로 표시됩니다.</p><button class="button button-primary" type="submit" ${state.clipBusy ? "disabled" : ""}>${state.clipBusy === "review" ? "검토 저장 중…" : "독립 검토 저장"}</button></div>
+    </form>
+  </section>`;
+}
+
 function renderClipReview() {
   const workspace = $("#clip-review-workspace");
   if (!workspace || !state.current) return;
@@ -272,7 +331,7 @@ function renderClipReview() {
     <div class="analysis-result">
       <div class="analysis-summary"><span>대표 움직임 힌트</span><strong>${escapeHtml(expressionHintName(state.clipAnalysis.dominant_expression_hint))}</strong></div>
       <div class="analysis-counts">${expressionEntries.length ? expressionEntries.map(([label, count]) => `<span>${escapeHtml(expressionHintName(label))}<b>${count}</b></span>`).join("") : `<span>분석한 프레임에서 얼굴 blendshape를 확인하지 못했습니다.</span>`}</div>
-      <p>${escapeHtml(state.clipAnalysis.non_diagnostic_notice || "표정 움직임 힌트이며 감정 상태로 확정하지 않습니다.")}</p>
+      <p>${escapeHtml(state.clipAnalysis.non_diagnostic_notice || "얼굴 미세 움직임 힌트이며 감정 상태로 확정하지 않습니다.")}</p>
     </div>` : `<div class="analysis-placeholder">선택 영상을 이 Mac 안에서만 샘플링해 얼굴 blendshape 움직임을 확인합니다.</div>`;
   const gptMarkup = state.gptReview ? `
     <div class="gpt-result"><div class="gpt-result-head"><strong>GPT 관찰 보조 초안</strong><span>${escapeHtml(state.gptReview.model || "GPT")}</span></div><div class="gpt-text">${escapeHtml(state.gptReview.review_text).replace(/\n/g, "<br>")}</div><p>전체 영상 전송 안 함 · 추출 프레임 ${state.gptReview.remote_frame_count}장 · 기록철 자동 반영 안 함</p></div>` : "";
@@ -301,7 +360,7 @@ function renderClipReview() {
       </article>
       <article class="card clip-analysis-panel">
         <div class="analysis-block">
-          <div class="clip-panel-head"><div><span>표정 움직임 힌트</span><strong>Google MediaPipe</strong></div><span class="local-only-pill">로컬</span></div>
+          <div class="clip-panel-head"><div><span>미세 움직임 힌트</span><strong>Google MediaPipe</strong></div><span class="local-only-pill">로컬</span></div>
           ${analysisMarkup}
           <button class="button button-secondary full-button" id="run-mediapipe-analysis" type="button" ${state.clipBusy || !mediaPipe.configured ? "disabled" : ""}>${state.clipBusy === "mediapipe" ? "로컬 분석 중…" : "MediaPipe로 분석"}</button>
         </div>
@@ -314,7 +373,8 @@ function renderClipReview() {
           ${gptMarkup}
         </div>
       </article>
-    </div>`;
+    </div>
+    ${crossReviewMarkup()}`;
 }
 
 function setTab(tab) {
@@ -476,6 +536,7 @@ $("#learning-plan-button").addEventListener("click", async () => {
 
 $("#clip-refresh-button").addEventListener("click", async () => {
   await loadLocalClips({ preserveSelection: true });
+  await loadEventReviews({ silent: true });
   state.clipAnalysis = null;
   state.gptReview = null;
   renderClipReview();
@@ -488,6 +549,7 @@ $("#clip-review-workspace").addEventListener("click", async (event) => {
     state.selectedClipId = clipButton.dataset.clipId;
     state.clipAnalysis = null;
     state.gptReview = null;
+    await loadEventReviews({ silent: true });
     renderClipReview();
     return;
   }
@@ -524,6 +586,32 @@ $("#clip-review-workspace").addEventListener("click", async (event) => {
   }
 });
 
+$("#clip-review-workspace").addEventListener("submit", async (event) => {
+  if (event.target.id !== "event-review-form") return;
+  event.preventDefault();
+  const data = new FormData(event.target);
+  state.clipBusy = "review";
+  renderClipReview();
+  try {
+    state.eventReviews = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/clips/${encodeURIComponent(state.selectedClipId)}/reviews`, {
+      method: "POST",
+      body: {
+        reviewer_role: data.get("reviewer_role"),
+        reviewer_name: data.get("reviewer_name").trim(),
+        decision: data.get("decision"),
+        observed_facts: data.get("observed_facts").trim(),
+        context_comment: data.get("context_comment").trim(),
+      },
+    });
+    toast("독립 검토를 저장했습니다. 기록철에는 자동 반영되지 않았습니다.");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.clipBusy = null;
+    renderClipReview();
+  }
+});
+
 $("#sensing-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
@@ -534,7 +622,7 @@ $("#sensing-form").addEventListener("submit", async (event) => {
     const expressionHint = Object.entries(result.facial_movement_counts || result.expression_label_counts || {}).sort((a, b) => b[1] - a[1])[0]?.[0];
     $("#sensing-result").innerHTML = `
       <div class="result-head"><div><p class="eyebrow">REVIEWED NOTE DRAFT</p><h3>관찰 메모 초안</h3></div><span class="draft-stamp">DRAFT</span></div>
-      <div class="sensing-metrics"><div><span>프레임</span><strong>${result.frame_count}</strong></div><div><span>얼굴 존재</span><strong>${Math.round(result.face_present_ratio * 100)}%</strong></div><div><span>자세 추정</span><strong>${Math.round(result.pose_present_ratio * 100)}%</strong></div><div><span>표정 움직임</span><strong>${escapeHtml(expressionHintName(expressionHint))}</strong></div></div>
+      <div class="sensing-metrics"><div><span>프레임</span><strong>${result.frame_count}</strong></div><div><span>얼굴 존재</span><strong>${Math.round(result.face_present_ratio * 100)}%</strong></div><div><span>자세 추정</span><strong>${Math.round(result.pose_present_ratio * 100)}%</strong></div><div><span>미세 움직임</span><strong>${escapeHtml(expressionHintName(expressionHint))}</strong></div></div>
       <div class="draft-lines">${result.reviewed_note_draft.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div>
       <div class="non-authoritative"><strong>비권위 초안</strong><br>${escapeHtml(result.non_authoritative_notice)}</div>`;
     toast("데모 관찰 초안을 만들었습니다. 공식 기록에는 반영되지 않았습니다.");

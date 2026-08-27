@@ -13,6 +13,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from ondamm_review import (  # noqa: E402
+    EventReviewStore,
     LocalClipCatalog,
     analyze_clip_with_mediapipe,
     analyze_video_frames,
@@ -84,6 +85,64 @@ class OndammLocalClipTests(unittest.TestCase):
         self.assertEqual(resolved.path, self.clip_path.resolve())
         with self.assertRaises(FileNotFoundError):
             self.catalog.resolve_clip(clip["clip_id"], child_id="child-b")
+
+    def test_cross_review_store_tracks_latest_role_views_and_consensus(self) -> None:
+        clip = self.catalog.resolve_clip(self.catalog.list_clips("child-a")[0]["clip_id"], child_id="child-a")
+        store = EventReviewStore(self.outputs / "event-reviews")
+
+        for role, name in [
+            ("guardian", "guardian-a"),
+            ("teacher", "teacher-a"),
+            ("institutional_social_worker", "worker-a"),
+        ]:
+            bundle = store.add_review(
+                child_id="child-a",
+                clip=clip,
+                reviewer_role=role,
+                reviewer_name=name,
+                decision="accepted",
+                observed_facts="고개가 왼쪽으로 이동한 구간을 확인함",
+                context_comment="환경 변화 직후였음",
+            )
+
+        self.assertEqual(bundle["summary"]["status"], "consensus_accepted")
+        self.assertTrue(bundle["summary"]["ready_for_human_promotion"])
+        self.assertEqual(bundle["summary"]["pending_roles"], [])
+        self.assertFalse(bundle["dossier_auto_updated"])
+        self.assertTrue((self.outputs / "event-reviews" / "child-a" / f"{clip.clip_id}.json").is_file())
+
+    def test_cross_review_store_preserves_revision_and_surfaces_disagreement(self) -> None:
+        clip = self.catalog.resolve_clip(self.catalog.list_clips("child-a")[0]["clip_id"], child_id="child-a")
+        store = EventReviewStore(self.outputs / "event-reviews")
+        for role, decision in [
+            ("guardian", "accepted"),
+            ("teacher", "rejected"),
+            ("institutional_social_worker", "accepted"),
+        ]:
+            bundle = store.add_review(
+                child_id="child-a",
+                clip=clip,
+                reviewer_role=role,
+                reviewer_name=f"{role}-a",
+                decision=decision,
+                observed_facts="동일한 짧은 움직임 구간을 확인함",
+            )
+
+        self.assertEqual(bundle["revision"], 3)
+        self.assertEqual(bundle["summary"]["status"], "disagreement")
+        self.assertFalse(bundle["summary"]["ready_for_human_promotion"])
+
+        revised = store.add_review(
+            child_id="child-a",
+            clip=clip,
+            reviewer_role="teacher",
+            reviewer_name="teacher-a",
+            decision="uncertain",
+            observed_facts="조명이 바뀌어 추가 맥락이 필요함",
+        )
+        latest = revised["summary"]["latest_by_role"]["teacher"]
+        self.assertIsNotNone(latest["supersedes_review_id"])
+        self.assertEqual(revised["summary"]["status"], "needs_context")
 
     def test_analyze_video_frames_samples_video_with_injected_analyzer(self) -> None:
         import cv2

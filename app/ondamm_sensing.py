@@ -121,7 +121,7 @@ def build_reviewed_note_draft(
     if expression_label_counts:
         dominant_expression = dominant_key(expression_label_counts, "unavailable")
         lines.append(
-            f"MediaPipe 표정 움직임 힌트(얼굴 움직임 proxy)는 `{dominant_expression}` 계열이 가장 자주 표시되었습니다. "
+            f"MediaPipe 미세 움직임 힌트(얼굴 움직임 proxy)는 `{dominant_expression}` 계열이 가장 자주 표시되었습니다. "
             "이는 얼굴 blendshape의 관찰 가능한 움직임 proxy일 뿐 감정 상태로 확정하지 마세요."
         )
     if facial_movement_counts:

@@ -74,7 +74,7 @@ class OnDammSensingTests(unittest.TestCase):
 
         self.assertEqual(draft.expression_label_counts, {"neutral": 1, "smile": 2})
         note_text = " ".join(draft.reviewed_note_draft)
-        self.assertIn("표정 움직임 힌트", note_text)
+        self.assertIn("미세 움직임 힌트", note_text)
         self.assertIn("감정 상태로 확정하지", note_text)
         self.assertNotIn("행복", note_text)
 

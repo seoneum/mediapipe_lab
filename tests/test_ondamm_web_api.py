@@ -177,6 +177,52 @@ class OndammWebApiTests(unittest.TestCase):
         self.assertEqual(len(self.gpt_review_calls), 1)
         self.assertEqual(self.service.get_dossier("child-api")["approved_session_summaries"], [])
 
+    def test_event_clip_cross_review_route_keeps_roles_separate_from_dossier(self) -> None:
+        clip_id = self.service.list_local_clips("child-api")[0]["clip_id"]
+
+        for role, decision in [
+            ("guardian", "accepted"),
+            ("teacher", "accepted"),
+            ("institutional_social_worker", "uncertain"),
+        ]:
+            status, result = self.router.dispatch(
+                "POST",
+                f"/api/dossiers/child-api/clips/{clip_id}/reviews",
+                {
+                    "reviewer_role": role,
+                    "reviewer_name": f"{role}-a",
+                    "decision": decision,
+                    "observed_facts": "시선 방향이 짧게 왼쪽으로 이동함",
+                    "context_comment": "활동 전환 직후",
+                },
+            )
+            self.assertEqual(status, 201)
+
+        read_status, bundle = self.router.dispatch(
+            "GET",
+            f"/api/dossiers/child-api/clips/{clip_id}/reviews",
+            None,
+        )
+        self.assertEqual(read_status, 200)
+        self.assertEqual(bundle["summary"]["status"], "needs_context")
+        self.assertEqual(bundle["summary"]["pending_roles"], [])
+        self.assertFalse(bundle["dossier_auto_updated"])
+        self.assertEqual(self.service.get_dossier("child-api")["approved_session_summaries"], [])
+
+    def test_event_review_rejects_unknown_role(self) -> None:
+        clip_id = self.service.list_local_clips("child-api")[0]["clip_id"]
+        with self.assertRaises(ValidationError):
+            self.service.add_event_review(
+                "child-api",
+                clip_id,
+                {
+                    "reviewer_role": "admin",
+                    "reviewer_name": "admin-a",
+                    "decision": "accepted",
+                    "observed_facts": "움직임 확인",
+                },
+            )
+
     def test_integrations_route_reports_configured_model(self) -> None:
         status, integrations = self.router.dispatch("GET", "/api/integrations", None)
 

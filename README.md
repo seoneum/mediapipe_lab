@@ -4,7 +4,7 @@ Apple Silicon Mac에서 MediaPipe 기반 얼굴·시선·자세 신호를 실험
 
 현재 핵심은 다음 세 가지입니다.
 
-- 미세표정 연구: 통제 촬영, 프레임별 478 landmarks·52 blendshapes·head transform 추출, optical-flow·DINOv3 변화 시각화
+- 미세 움직임 연구: 통제 촬영, 프레임별 478 landmarks·52 blendshapes·head transform 추출, optical-flow·DINOv3 변화 시각화
 - ON DAMM MVP: dossier, 승인된 수업 기록, 학습 프로그램 초안, handoff, 철회 잠금, 검토형 얼굴 움직임 프로필
 - 오프라인 영상 분석: 사람 추적, 얼굴 신호·행동 proxy 지표, 자막 MP4와 JSON/CSV 생성
 
@@ -29,7 +29,7 @@ bash scripts/camera_probe.sh
 
 카메라가 열리지 않으면 macOS의 **시스템 설정 → 개인정보 보호 및 보안 → 카메라**에서 Terminal 또는 사용하는 IDE 권한을 확인하고 `--camera 0`, `--camera 1` 순서로 시도하세요.
 
-## 미세표정 데이터 수집
+## 미세 움직임 데이터 수집
 
 ### 1. 통제 조건 촬영
 
@@ -106,7 +106,7 @@ CSV에는 얼굴 검출 여부와 함께 다음 값이 저장됩니다.
 
 DINOv3 ViT-S/16은 gated 모델이어서 저장소에 포함하지 않습니다. Hugging Face에서 `facebook/dinov3-vits16-pretrain-lvd1689m` 라이선스에 동의한 뒤 전체 모델 파일을 `models/dinov3/vits16/`에 내려받아야 합니다. DINO 없이 프레임별 MediaPipe CSV만 필요하면 `micro_expression_video.py`를 사용하세요.
 
-## 미세표정 학습 설계
+## 미세 움직임 학습 설계
 
 이 저장소는 현재 **수집·신호 추출·시각화까지 구현**되어 있고, 1D CNN/TCN temporal classifier는 아직 구현하지 않았습니다. 모델 입력의 권장 형태는 프레임별 절대값, neutral 대비 변화량, 1차 시간차를 함께 쓰는 것입니다.
 
@@ -143,6 +143,8 @@ open http://127.0.0.1:8765
 - 사람에게 읽히는 handoff export와 수동 재구성
 - 동의 철회 시 `withdrawn_locked` 전이
 - MediaPipe 관찰 보조와 local clip 검토
+- 지정 움직임·시선·자세 이벤트의 짧은 영상 자동 저장
+- 보호자·교사·기관 사회복지사의 역할별 독립 검토와 의견 일치·불일치 표시
 - 승인된 session ID를 근거로 한 개인별 얼굴 움직임 규칙
 
 원격 GPT 프레임 검토는 선택 기능입니다. 전체 영상을 보내지 않고 제한된 축소 JPEG frame만 전송하며, UI에서 매번 명시적으로 동의해야 합니다.
@@ -154,6 +156,31 @@ bash scripts/ondamm_web.sh
 ```
 
 키, dossier, 촬영 영상과 실행 결과는 저장소에 커밋하지 마세요.
+
+### 지정 움직임 이벤트 자동 저장과 교차 검토
+
+승인된 얼굴 움직임 프로필 또는 기본 움직임 라벨을 지정하면, 해당 움직임이 설정 시간 이상 지속될 때 이벤트 클립을 로컬에 저장할 수 있습니다. 예를 들어 `mouth_dimple`을 0.4초 이상 관찰할 때 자동 저장하려면 다음처럼 실행합니다.
+
+```bash
+bash scripts/ondamm_learning.sh \
+  --child-id child-a \
+  --duration-seconds 120 \
+  --record-events \
+  --movement-label mouth_dimple \
+  --movement-min-seconds 0.4
+```
+
+여러 라벨은 `--movement-label`을 반복해 지정합니다. 라벨은 감정명이 아니라 `mouth_dimple`, `brow_raise`, `lip_press`처럼 관찰 가능한 움직임 이름이어야 합니다.
+
+웹 UI의 **관찰 보조 → 미세 움직임 이벤트 검토**에서 자동 저장된 MP4를 확인할 수 있습니다. 각 이벤트에는 다음 세 역할이 독립적으로 의견을 남깁니다.
+
+- 보호자
+- 교사
+- 기관 사회복지사
+
+각 검토는 `의미 있는 움직임 후보 / 이벤트 아님 / 추가 맥락 필요`, 영상에서 직접 확인한 사실, 상황 코멘트를 분리해 저장합니다. 세 역할의 최신 의견이 일치하는지 표시하지만, 합의가 생겨도 dossier나 수업 기록에는 자동 반영하지 않습니다. 별도의 사람 승인 단계가 필요합니다.
+
+현재 로컬 MVP에는 계정 인증과 기관별 권한 관리가 없으므로 검토자가 UI에서 역할과 이름을 직접 선택합니다. 실제 기관 배포 전에는 사용자 인증, 역할 기반 접근 제어, 전자서명과 보존기간 정책을 추가해야 합니다.
 
 ## 오프라인 영상 분석기
 
@@ -237,12 +264,12 @@ app/ondamm_smirk_fusion_train.py
 
 ```text
 app/
-  micro_expression_*        미세표정 촬영·분석·실시간 신호
+  micro_expression_*        미세 움직임 촬영·분석·실시간 신호(호환용 파일명 유지)
   holistic_camera.py        얼굴·포즈·손·시선 실시간 preview
   ondamm_*                  ON DAMM 도메인·센싱·웹·영상 분석
 smirk_ondamm/               SMIRK dataset/training/export adapter
 scripts/                    설치·실행 wrapper
-configs/                    tracker·미세표정 capture 설정
+configs/                    tracker·미세 움직임 capture 설정
 docs/                       설계와 환경 문서
 tests/                      자동 회귀 테스트
 ui/                         ON DAMM 로컬 웹 UI

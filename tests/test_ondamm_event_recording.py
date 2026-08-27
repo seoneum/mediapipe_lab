@@ -94,6 +94,34 @@ class OnDammEventRecordingTests(unittest.TestCase):
         self.assertEqual(posture_events[0].event_type, "posture_shifted")
         self.assertEqual(posture_events[0].trigger_values["posture_proxy"], "left_shifted")
 
+    def test_detector_emits_only_configured_sustained_facial_movement(self) -> None:
+        policy = EventRecordingPolicy(
+            facial_movement_min_seconds=0.4,
+            target_facial_movement_labels=("lip_corner_pull",),
+        )
+        detector = SustainedEventDetector(policy)
+
+        self.assertEqual(
+            detector.add_observation(
+                EventObservation(0.0, True, "center", "centered", ("brow_raise",))
+            ),
+            [],
+        )
+        self.assertEqual(
+            detector.add_observation(
+                EventObservation(1.0, True, "center", "centered", ("lip_corner_pull",))
+            ),
+            [],
+        )
+        events = detector.add_observation(
+            EventObservation(1.4, True, "center", "centered", ("lip_corner_pull",))
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "facial_movement_detected")
+        self.assertEqual(events[0].trigger_values["facial_movement_labels"], ["lip_corner_pull"])
+        self.assertNotIn("emotion", events[0].trigger_values)
+
     def test_local_clip_recorder_writes_npz_clip_with_metadata(self) -> None:
         policy = EventRecordingPolicy(pre_event_buffer_seconds=1.0, face_missing_min_seconds=2.0)
         with tempfile.TemporaryDirectory(prefix="ondamm-event-clips-") as temp_dir:

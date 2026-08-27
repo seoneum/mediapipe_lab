@@ -24,10 +24,12 @@ class EventRecordingPolicy:
     face_missing_min_seconds: float = 2.0
     gaze_diverted_min_seconds: float = 2.0
     posture_shifted_min_seconds: float = 3.0
+    facial_movement_min_seconds: float = 0.4
     pre_event_buffer_seconds: float = 1.5
     clip_tail_seconds: float = 0.0
     gaze_diverted_zones: tuple[str, ...] = DEFAULT_GAZE_DIVERTED_ZONES
     posture_shifted_values: tuple[str, ...] = DEFAULT_POSTURE_SHIFTED_VALUES
+    target_facial_movement_labels: tuple[str, ...] = ()
 
     def threshold_for(self, event_type: str) -> float:
         if event_type == "face_missing":
@@ -36,6 +38,8 @@ class EventRecordingPolicy:
             return self.gaze_diverted_min_seconds
         if event_type == "posture_shifted":
             return self.posture_shifted_min_seconds
+        if event_type == "facial_movement_detected":
+            return self.facial_movement_min_seconds
         raise ValueError(f"Unsupported event type: {event_type}")
 
     def history_window_seconds(self) -> float:
@@ -43,6 +47,7 @@ class EventRecordingPolicy:
             self.face_missing_min_seconds,
             self.gaze_diverted_min_seconds,
             self.posture_shifted_min_seconds,
+            self.facial_movement_min_seconds,
         ) + self.pre_event_buffer_seconds + self.clip_tail_seconds
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,6 +60,7 @@ class EventObservation:
     face_present: bool
     gaze_zone: str
     posture_proxy: str
+    facial_movement_labels: tuple[str, ...] = ()
 
 
 @dataclass
@@ -114,6 +120,7 @@ class SustainedEventDetector:
             "face_missing": _PendingEventState(),
             "gaze_diverted": _PendingEventState(),
             "posture_shifted": _PendingEventState(),
+            "facial_movement_detected": _PendingEventState(),
         }
 
     def add_observation(self, observation: EventObservation) -> list[EventMetadata]:
@@ -128,7 +135,7 @@ class SustainedEventDetector:
                     state.trigger_values.update(trigger_values)
                 if not state.emitted:
                     duration = observation.timestamp - state.start_timestamp
-                    if duration >= self.policy.threshold_for(event_type):
+                    if duration + 1e-9 >= self.policy.threshold_for(event_type):
                         emitted_trigger_values = dict(state.trigger_values)
                         emitted_trigger_values["duration_seconds"] = round(duration, 3)
                         events.append(
@@ -151,6 +158,11 @@ class SustainedEventDetector:
     def _iter_checks(self, observation: EventObservation) -> list[tuple[str, bool, dict[str, Any]]]:
         gaze_zone = observation.gaze_zone.strip().lower()
         posture_proxy = observation.posture_proxy.strip().lower()
+        active_movements = tuple(
+            sorted({label.strip() for label in observation.facial_movement_labels if label.strip()})
+        )
+        target_movements = set(self.policy.target_facial_movement_labels)
+        matched_movements = tuple(label for label in active_movements if label in target_movements)
         return [
             (
                 "face_missing",
@@ -175,6 +187,14 @@ class SustainedEventDetector:
                 {
                     "face_present": observation.face_present,
                     "posture_proxy": posture_proxy,
+                },
+            ),
+            (
+                "facial_movement_detected",
+                observation.face_present and bool(matched_movements),
+                {
+                    "face_present": observation.face_present,
+                    "facial_movement_labels": list(matched_movements),
                 },
             ),
         ]
