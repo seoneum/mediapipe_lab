@@ -24,6 +24,11 @@ elif [[ ! -d ".venv" ]]; then
   "$PY312" -m venv .venv
 fi
 
+# 기존 가상환경이 uv 등의 방식으로 만들어져 pip 모듈이 빠진 경우 복구한다.
+if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+  .venv/bin/python -m ensurepip --upgrade
+fi
+
 # pip 캐시를 프로젝트 내부에 둬서 재설치 속도를 높이고 파일 위치를 예측 가능하게 한다.
 PIP_CACHE_DIR=.pip-cache .venv/bin/python -m pip install -U pip
 PIP_CACHE_DIR=.pip-cache .venv/bin/python -m pip install -r requirements.txt

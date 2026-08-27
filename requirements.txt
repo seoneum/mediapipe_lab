@@ -10,6 +10,10 @@ numpy
 # 시각화/일부 MediaPipe 내부 설정 파일 생성 경로와 관련
 matplotlib
 
+# DINOv3 기반 미세표정 변화 heatmap
+Pillow
+transformers>=4.56,<6
+
 # 오디오 실험을 확장할 때 사용할 패키지
 soundfile
 
@@ -21,3 +25,6 @@ insightface==0.7.3
 emotiefflib[torch]>=1.1,<2
 opencv-python>=4.10,<5
 scikit-learn>=1.4
+
+# 테스트 러너
+pytest>=8,<10

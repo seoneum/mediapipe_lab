@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ondamm_models import Dossier, SessionSummary, unique_preserving_order
+from ondamm_models import Dossier, FacialMovementProfile, SessionSummary, unique_preserving_order
 from ondamm_recommendations import build_baseline_recommendation
 from ondamm_security import build_export_manifest, build_reestablishment_template
 from ondamm_store import create_dossier, export_path, list_dossiers, load_dossier, save_dossier
@@ -115,6 +115,24 @@ def render_handoff_markdown(dossier: Dossier) -> str:
     else:
         lines.append("- 없음")
 
+    lines.extend(["", "## Approved facial movement profiles"])
+    if dossier.approved_facial_movement_profiles:
+        for profile in dossier.approved_facial_movement_profiles:
+            lines.extend(
+                [
+                    f"### {profile.display_name}",
+                    f"- label: `{profile.label}`",
+                    f"- blendshapes: {', '.join(profile.blendshape_names)}",
+                    f"- aggregation/threshold: {profile.aggregation} / {profile.activation_threshold}",
+                    f"- approved_by: {profile.approved_by}",
+                    f"- source_session_ids: {', '.join(profile.source_session_ids)}",
+                    "- interpretation_boundary: 관찰 가능한 움직임 proxy이며 감정·집중도·진단으로 해석하지 않음",
+                    "",
+                ]
+            )
+    else:
+        lines.append("- 없음")
+
     return "\n".join(lines) + "\n"
 
 
@@ -191,6 +209,29 @@ def command_add_session_summary(args: argparse.Namespace) -> None:
     path = save_dossier(dossier)
     print(f"session_saved: {path}")
     print(summary.session_id)
+
+
+def command_approve_facial_movement_profile(args: argparse.Namespace) -> None:
+    dossier = load_dossier(args.child_id)
+    ensure_active(dossier, "approve facial movement profile")
+    source_session_ids = parse_repeatable(args.source_session_id)
+    approved_session_ids = {item.session_id for item in dossier.approved_session_summaries}
+    if not source_session_ids or not set(source_session_ids).issubset(approved_session_ids):
+        raise ValueError("source-session-id must reference approved dossier session summaries")
+    profile = FacialMovementProfile.create(
+        label=args.label,
+        display_name=args.display_name,
+        blendshape_names=parse_repeatable(args.blendshape),
+        aggregation=args.aggregation,
+        activation_threshold=args.threshold,
+        approved_by=args.approved_by,
+        source_session_ids=source_session_ids,
+        priority=args.priority,
+    )
+    dossier.add_facial_movement_profile(profile)
+    path = save_dossier(dossier)
+    print(f"facial_profile_saved: {path}")
+    print(profile.profile_id)
 
 
 def command_recommend_baseline(args: argparse.Namespace) -> None:
@@ -342,6 +383,18 @@ def build_parser() -> argparse.ArgumentParser:
     session.add_argument("--approved-by", required=True)
     session.add_argument("--tag", action="append")
     session.set_defaults(func=command_add_session_summary)
+
+    facial_profile = subparsers.add_parser("approve-facial-movement-profile")
+    facial_profile.add_argument("--child-id", required=True)
+    facial_profile.add_argument("--label", required=True)
+    facial_profile.add_argument("--display-name", required=True)
+    facial_profile.add_argument("--blendshape", action="append", required=True)
+    facial_profile.add_argument("--aggregation", choices=["mean", "max", "min"], required=True)
+    facial_profile.add_argument("--threshold", type=float, required=True)
+    facial_profile.add_argument("--priority", type=int, default=80)
+    facial_profile.add_argument("--approved-by", required=True)
+    facial_profile.add_argument("--source-session-id", action="append", required=True)
+    facial_profile.set_defaults(func=command_approve_facial_movement_profile)
 
     recommend = subparsers.add_parser("recommend-baseline")
     recommend.add_argument("--child-id", required=True)

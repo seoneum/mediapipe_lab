@@ -15,6 +15,7 @@ import mediapipe as mp
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import holistic_landmarker
 
+from ondamm_facial_movement import analyze_facial_movements
 from paths import HOLISTIC_MODEL, base_options
 
 
@@ -87,6 +88,14 @@ LEFT_IRIS = [473, 474, 475, 476, 477]
 RIGHT_EYE_CORNERS = (33, 133)
 LEFT_EYE_CORNERS = (362, 263)
 
+# iris 중심은 정면을 보고 있어도 카메라 높이, 눈꺼풀 모양, 얼굴 각도에
+# 따라 약간 위/아래로 치우칠 수 있다. 작은 수직 편향은 center deadband로
+# 흡수하고, 명확한 이동만 up/down으로 표시한다.
+GAZE_LEFT_THRESHOLD = 0.42
+GAZE_RIGHT_THRESHOLD = 0.58
+GAZE_UP_THRESHOLD = -0.075
+GAZE_DOWN_THRESHOLD = 0.075
+
 # face_blendshapes 점수를 사람이 읽기 쉬운 대략적 표정 라벨로 묶는 규칙.
 # 임상적 감정 판정이 아니라 화면 표시용 휴리스틱이다.
 EXPRESSION_RULES = [
@@ -95,6 +104,34 @@ EXPRESSION_RULES = [
     ("blink", ["eyeBlinkLeft", "eyeBlinkRight"]),
     ("frown", ["mouthFrownLeft", "mouthFrownRight", "browDownLeft", "browDownRight"]),
     ("squint", ["eyeSquintLeft", "eyeSquintRight"]),
+]
+# Micro-expression visualization ROIs.
+# MediaPipe Face Mesh 478 landmark indexing.
+LEFT_EYE_ROI = [
+    33, 7, 163, 144, 145, 153, 154, 155,
+    133, 173, 157, 158, 159, 160, 161, 246,
+]
+
+RIGHT_EYE_ROI = [
+    362, 382, 381, 380, 374, 373, 390, 249,
+    263, 466, 388, 387, 386, 385, 384, 398,
+]
+
+LEFT_BROW_ROI = [
+    70, 63, 105, 66, 107,
+    55, 65, 52, 53, 46,
+]
+
+RIGHT_BROW_ROI = [
+    336, 296, 334, 293, 300,
+    285, 295, 282, 283, 276,
+]
+
+MOUTH_ROI = [
+    61, 146, 91, 181, 84, 17,
+    314, 405, 321, 375, 291,
+    308, 324, 318, 402, 317,
+    14, 87, 178, 88, 95, 78,
 ]
 
 
@@ -113,6 +150,97 @@ def draw_points(frame, landmarks, color, radius=2):
         # 카메라 밖으로 튄 좌표는 그리지 않는다.
         if 0 <= x < w and 0 <= y < h:
             cv2.circle(frame, (x, y), radius, color, -1)
+
+
+def face_bbox_info(landmarks, frame):
+    """얼굴 landmark로 bbox와 영상 세로 대비 얼굴 높이 비율을 계산한다."""
+    if not landmarks:
+        return None
+
+    h, w = frame.shape[:2]
+
+    points = np.array(
+        [
+            landmark_to_pixel(lm, w, h)
+            for lm in landmarks
+        ],
+        dtype=np.int32,
+    )
+
+    x1 = int(points[:, 0].min())
+    y1 = int(points[:, 1].min())
+    x2 = int(points[:, 0].max())
+    y2 = int(points[:, 1].max())
+
+    face_height = max(1, y2 - y1)
+    face_ratio = face_height / h
+
+    return x1, y1, x2, y2, face_ratio
+
+
+def draw_roi_mask(
+    frame,
+    landmarks,
+    indices,
+    color,
+    alpha=0.20,
+):
+    """landmark 집합으로 반투명 얼굴 ROI mask를 그린다."""
+    if not landmarks:
+        return
+
+    h, w = frame.shape[:2]
+
+    pts = []
+
+    for index in indices:
+        if index >= len(landmarks):
+            continue
+
+        pts.append(
+            landmark_to_pixel(
+                landmarks[index],
+                w,
+                h,
+            )
+        )
+
+    if len(pts) < 3:
+        return
+
+    pts = np.asarray(
+        pts,
+        dtype=np.int32,
+    )
+
+    # 순서가 완벽한 polygon이 아니어도 안정적으로 영역을 만들기 위해 convex hull.
+    hull = cv2.convexHull(pts)
+
+    overlay = frame.copy()
+
+    cv2.fillConvexPoly(
+        overlay,
+        hull,
+        color,
+    )
+
+    cv2.addWeighted(
+        overlay,
+        alpha,
+        frame,
+        1.0 - alpha,
+        0,
+        frame,
+    )
+
+    cv2.polylines(
+        frame,
+        [hull],
+        True,
+        color,
+        1,
+        cv2.LINE_AA,
+    )
 
 
 def draw_connections(frame, landmarks, connections, color, thickness=2):
@@ -168,18 +296,7 @@ def estimate_gaze(face_landmarks):
     horizontal = (right[0] + left[0]) / 2
     vertical = (right[1] + left[1]) / 2
 
-    # 여기 threshold를 바꾸면 시선 판정 민감도가 달라진다.
-    # 예: left/right가 너무 쉽게 뜨면 0.42/0.58을 0.38/0.62처럼 더 벌린다.
-    if horizontal < 0.42:
-        direction = "left"
-    elif horizontal > 0.58:
-        direction = "right"
-    elif vertical < -0.035:
-        direction = "up"
-    elif vertical > 0.045:
-        direction = "down"
-    else:
-        direction = "center"
+    direction = classify_gaze_direction(horizontal, vertical)
 
     return {
         "direction": direction,
@@ -188,6 +305,21 @@ def estimate_gaze(face_landmarks):
         "right_iris": right[2],
         "left_iris": left[2],
     }
+
+
+def classify_gaze_direction(horizontal, vertical):
+    """iris 비율을 넓은 center deadband를 둔 카메라 상대 구역으로 분류한다."""
+    if horizontal < GAZE_LEFT_THRESHOLD:
+        direction = "left"
+    elif horizontal > GAZE_RIGHT_THRESHOLD:
+        direction = "right"
+    elif vertical < GAZE_UP_THRESHOLD:
+        direction = "up"
+    elif vertical > GAZE_DOWN_THRESHOLD:
+        direction = "down"
+    else:
+        direction = "center"
+    return direction
 
 
 def draw_iris(frame, gaze, radius=4):
@@ -216,20 +348,9 @@ def top_blendshapes(face_blendshapes, limit):
 
 
 def estimate_expression(face_blendshapes, top_limit=DEFAULT_TOP_EXPRESSIONS):
-    """EXPRESSION_RULES를 이용해 대략적인 표정 라벨을 만든다."""
-    scores = blendshape_scores(face_blendshapes)
-    if not scores:
-        return "neutral", []
-    ranked = []
-    for label, keys in EXPRESSION_RULES:
-        values = [scores.get(key, 0.0) for key in keys]
-        ranked.append((label, sum(values) / len(values)))
-    label, score = max(ranked, key=lambda item: item[1])
-
-    # 너무 약한 표정 점수는 neutral로 처리한다. 민감도를 바꾸려면 0.25를 조정한다.
-    if score < 0.25:
-        label = "neutral"
-    return label, top_blendshapes(face_blendshapes, top_limit)
+    """감정이 아닌 관찰 가능한 얼굴 움직임 힌트를 반환한다."""
+    analysis = analyze_facial_movements(face_blendshapes, top_limit=top_limit)
+    return analysis.primary_label, list(analysis.top_blendshapes)
 
 
 def put_lines(frame, lines, origin=(16, 32), line_height=28):
@@ -294,6 +415,7 @@ def main() -> None:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((time.monotonic() - start) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            bbox_info = None
 
             # 선 먼저 그리고 점을 나중에 그리면 점이 선 위에 보여서 읽기 쉽다.
             if not args.no_lines:
@@ -306,6 +428,67 @@ def main() -> None:
                 draw_points(frame, result.face_landmarks, (255, 180, 0), max(1, args.point_radius - 1))
             draw_points(frame, result.left_hand_landmarks, (0, 255, 0), args.point_radius + 1)
             draw_points(frame, result.right_hand_landmarks, (255, 0, 255), args.point_radius + 1)
+            if result.face_landmarks:
+                # ------------------------------------
+                # Micro-expression ROI visualization
+                # ------------------------------------
+                draw_roi_mask(
+                    frame,
+                    result.face_landmarks,
+                    LEFT_EYE_ROI,
+                    (255, 120, 0),
+                )
+
+                draw_roi_mask(
+                    frame,
+                    result.face_landmarks,
+                    RIGHT_EYE_ROI,
+                    (255, 120, 0),
+                )
+
+                draw_roi_mask(
+                    frame,
+                    result.face_landmarks,
+                    LEFT_BROW_ROI,
+                    (0, 200, 255),
+                )
+
+                draw_roi_mask(
+                    frame,
+                    result.face_landmarks,
+                    RIGHT_BROW_ROI,
+                    (0, 200, 255),
+                )
+
+                draw_roi_mask(
+                    frame,
+                    result.face_landmarks,
+                    MOUTH_ROI,
+                    (100, 0, 255),
+                )
+
+                bbox_info = face_bbox_info(
+                    result.face_landmarks,
+                    frame,
+                )
+
+                if bbox_info is not None:
+                    x1, y1, x2, y2, face_ratio = bbox_info
+
+                    cv2.rectangle(
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        (255, 255, 255),
+                        1,
+                    )
+
+                    if 0.50 <= face_ratio <= 0.75:
+                        face_status = "GOOD"
+                    elif face_ratio < 0.50:
+                        face_status = "TOO SMALL"
+                    else:
+                        face_status = "TOO LARGE"
 
             gaze = None if args.no_iris else estimate_gaze(result.face_landmarks)
             if gaze:
@@ -330,6 +513,11 @@ def main() -> None:
                     f"left_pts={counts[2]} right_pts={counts[3]}  q=quit"
                 ),
             ]
+            if result.face_landmarks and bbox_info is not None:
+                overlay_lines.append(
+                    f"face_size={face_ratio * 100:.1f}%  "
+                    f"capture={face_status}"
+                )
             if not args.no_expression:
                 expression, blendshapes = estimate_expression(result.face_blendshapes, args.top_expressions)
                 shown = ", ".join(f"{name}:{score:.2f}" for name, score in blendshapes[: args.top_expressions])

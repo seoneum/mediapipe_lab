@@ -24,6 +24,8 @@ class ObservationTally:
     gaze_zone_counts: Counter[str] = field(default_factory=Counter)
     posture_proxy_counts: Counter[str] = field(default_factory=Counter)
     expression_label_counts: Counter[str] = field(default_factory=Counter)
+    facial_movement_counts: Counter[str] = field(default_factory=Counter)
+    eye_closure_state_counts: Counter[str] = field(default_factory=Counter)
 
     def add_frame(
         self,
@@ -33,6 +35,8 @@ class ObservationTally:
         gaze_zone: str,
         posture_proxy: str,
         expression_label: str | None = None,
+        facial_movement_labels: list[str] | tuple[str, ...] | None = None,
+        eye_closure_state: str | None = None,
     ) -> None:
         self.frame_count += 1
         if face_present:
@@ -43,6 +47,10 @@ class ObservationTally:
         self.posture_proxy_counts[posture_proxy] += 1
         if expression_label:
             self.expression_label_counts[expression_label] += 1
+        for label in facial_movement_labels or ():
+            self.facial_movement_counts[label] += 1
+        if eye_closure_state:
+            self.eye_closure_state_counts[eye_closure_state] += 1
 
 
 @dataclass
@@ -56,6 +64,8 @@ class SensingDraft:
     gaze_zone_counts: dict[str, int]
     posture_proxy_counts: dict[str, int]
     expression_label_counts: dict[str, int]
+    facial_movement_counts: dict[str, int]
+    eye_closure_state_counts: dict[str, int]
     optional_audio_presence_note: str | None
     reviewed_note_draft: list[str]
     non_authoritative_notice: str
@@ -73,6 +83,8 @@ class SensingDraft:
             "gaze_zone_counts": self.gaze_zone_counts,
             "posture_proxy_counts": self.posture_proxy_counts,
             "expression_label_counts": self.expression_label_counts,
+            "facial_movement_counts": self.facial_movement_counts,
+            "eye_closure_state_counts": self.eye_closure_state_counts,
             "optional_audio_presence_note": self.optional_audio_presence_note,
             "reviewed_note_draft": self.reviewed_note_draft,
             "non_authoritative_notice": self.non_authoritative_notice,
@@ -94,6 +106,8 @@ def build_reviewed_note_draft(
     gaze_zone_counts: dict[str, int],
     posture_proxy_counts: dict[str, int],
     expression_label_counts: dict[str, int],
+    facial_movement_counts: dict[str, int],
+    eye_closure_state_counts: dict[str, int],
     optional_audio_presence_note: str | None,
 ) -> list[str]:
     dominant_gaze = dominant_key(gaze_zone_counts, "unknown")
@@ -107,8 +121,29 @@ def build_reviewed_note_draft(
     if expression_label_counts:
         dominant_expression = dominant_key(expression_label_counts, "unavailable")
         lines.append(
-            f"MediaPipe 표정 움직임 힌트는 `{dominant_expression}` 계열이 가장 자주 표시되었습니다. "
-            "이는 얼굴 blendshape의 대략적 움직임 표시일 뿐 감정 상태로 확정하지 마세요."
+            f"MediaPipe 표정 움직임 힌트(얼굴 움직임 proxy)는 `{dominant_expression}` 계열이 가장 자주 표시되었습니다. "
+            "이는 얼굴 blendshape의 관찰 가능한 움직임 proxy일 뿐 감정 상태로 확정하지 마세요."
+        )
+    if facial_movement_counts:
+        observed = ", ".join(
+            label
+            for label, _ in sorted(
+                facial_movement_counts.items(), key=lambda item: (-item[1], item[0])
+            )[:5]
+        )
+        lines.append(
+            f"동시에 관찰된 얼굴 움직임 proxy에는 `{observed}` 등이 포함되었습니다. "
+            "각 항목은 감정 라벨이 아닙니다."
+        )
+    closed_frames = sum(
+        count
+        for state, count in eye_closure_state_counts.items()
+        if state in {"both_closed", "left_closed", "right_closed"}
+    )
+    if closed_frames:
+        lines.append(
+            f"눈꺼풀 닫힘 움직임 proxy가 {closed_frames}개 프레임에서 관찰되었습니다. "
+            "이를 졸림이나 집중도 상태로 해석하지 마세요."
         )
     if optional_audio_presence_note:
         lines.append(f"선택적 오디오 관찰 메모: {optional_audio_presence_note.strip()}")
@@ -128,12 +163,16 @@ def build_sensing_draft(
     gaze_zone_counts = dict(sorted(tally.gaze_zone_counts.items()))
     posture_proxy_counts = dict(sorted(tally.posture_proxy_counts.items()))
     expression_label_counts = dict(sorted(tally.expression_label_counts.items()))
+    facial_movement_counts = dict(sorted(tally.facial_movement_counts.items()))
+    eye_closure_state_counts = dict(sorted(tally.eye_closure_state_counts.items()))
     reviewed_note_draft = build_reviewed_note_draft(
         face_present_ratio=face_present_ratio,
         pose_present_ratio=pose_present_ratio,
         gaze_zone_counts=gaze_zone_counts,
         posture_proxy_counts=posture_proxy_counts,
         expression_label_counts=expression_label_counts,
+        facial_movement_counts=facial_movement_counts,
+        eye_closure_state_counts=eye_closure_state_counts,
         optional_audio_presence_note=optional_audio_presence_note,
     )
     return SensingDraft(
@@ -146,6 +185,8 @@ def build_sensing_draft(
         gaze_zone_counts=gaze_zone_counts,
         posture_proxy_counts=posture_proxy_counts,
         expression_label_counts=expression_label_counts,
+        facial_movement_counts=facial_movement_counts,
+        eye_closure_state_counts=eye_closure_state_counts,
         optional_audio_presence_note=optional_audio_presence_note.strip() if optional_audio_presence_note else None,
         reviewed_note_draft=reviewed_note_draft,
         non_authoritative_notice="센서 출력은 non-authoritative draft이며 dossier에 자동 저장되지 않습니다.",

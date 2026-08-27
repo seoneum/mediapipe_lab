@@ -132,6 +132,85 @@ class RecommendationEntry:
 
 
 @dataclass
+class FacialMovementProfile:
+    profile_id: str
+    label: str
+    display_name: str
+    blendshape_names: list[str]
+    aggregation: str
+    activation_threshold: float
+    approved_by: str
+    source_session_ids: list[str]
+    priority: int = 80
+    status: str = "approved"
+    created_at: str = field(default_factory=utc_now)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        label: str,
+        display_name: str,
+        blendshape_names: list[str],
+        aggregation: str,
+        activation_threshold: float,
+        approved_by: str,
+        source_session_ids: list[str],
+        priority: int = 80,
+    ) -> "FacialMovementProfile":
+        # Keep MediaPipe outside the dossier domain; this only validates names
+        # and thresholds used by the pure movement analyzer.
+        from ondamm_facial_movement import MovementRule
+
+        rule = MovementRule(
+            label=label,
+            display_name=display_name,
+            blendshape_names=tuple(blendshape_names),
+            aggregation=aggregation,
+            activation_threshold=activation_threshold,
+            priority=priority,
+        )
+        approver = approved_by.strip() if isinstance(approved_by, str) else ""
+        source_ids = unique_preserving_order(source_session_ids)
+        if not approver or not source_ids:
+            raise ValueError("facial movement profile requires explicit approval and source sessions")
+        return cls(
+            profile_id=f"facial-profile-{uuid4().hex[:10]}",
+            label=rule.label,
+            display_name=rule.display_name,
+            blendshape_names=list(rule.blendshape_names),
+            aggregation=rule.aggregation,
+            activation_threshold=rule.activation_threshold,
+            approved_by=approver,
+            source_session_ids=source_ids,
+            priority=rule.priority,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "FacialMovementProfile":
+        profile = cls(
+            profile_id=data["profile_id"],
+            label=data["label"],
+            display_name=data["display_name"],
+            blendshape_names=list(data["blendshape_names"]),
+            aggregation=data["aggregation"],
+            activation_threshold=float(data["activation_threshold"]),
+            approved_by=data["approved_by"],
+            source_session_ids=list(data["source_session_ids"]),
+            priority=int(data.get("priority", 80)),
+            status=data.get("status", "approved"),
+            created_at=data.get("created_at", utc_now()),
+        )
+        from ondamm_facial_movement import rules_from_approved_profiles
+
+        rules_from_approved_profiles([profile.to_dict()])
+        return profile
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Dossier:
     child_id: str
     display_name: str
@@ -146,6 +225,7 @@ class Dossier:
     handoff_notes: list[str] = field(default_factory=list)
     approved_session_summaries: list[SessionSummary] = field(default_factory=list)
     approved_plan_history: list[RecommendationEntry] = field(default_factory=list)
+    approved_facial_movement_profiles: list[FacialMovementProfile] = field(default_factory=list)
     access_audit_records: list[dict[str, Any]] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     created_at: str = field(default_factory=utc_now)
@@ -199,6 +279,10 @@ class Dossier:
                 RecommendationEntry.from_dict(item)
                 for item in data.get("approved_plan_history", [])
             ],
+            approved_facial_movement_profiles=[
+                FacialMovementProfile.from_dict(item)
+                for item in data.get("approved_facial_movement_profiles", [])
+            ],
             access_audit_records=list(data.get("access_audit_records", [])),
             schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
             created_at=data.get("created_at", utc_now()),
@@ -215,6 +299,20 @@ class Dossier:
     def add_recommendation(self, recommendation: RecommendationEntry) -> None:
         self.approved_plan_history.append(recommendation)
         self.touch()
+
+    def add_facial_movement_profile(self, profile: FacialMovementProfile) -> None:
+        existing = {item.label: item for item in self.approved_facial_movement_profiles}
+        existing[profile.label] = profile
+        self.approved_facial_movement_profiles = list(existing.values())
+        self.add_audit_event(
+            event_type="facial_movement_profile_approved",
+            actor_id=profile.approved_by,
+            details={
+                "profile_id": profile.profile_id,
+                "label": profile.label,
+                "source_session_ids": profile.source_session_ids,
+            },
+        )
 
     def add_audit_event(self, event_type: str, actor_id: str, details: dict[str, Any]) -> None:
         self.access_audit_records.append(
@@ -243,6 +341,9 @@ class Dossier:
             "handoff_notes": unique_preserving_order(self.handoff_notes),
             "approved_session_summaries": [item.to_dict() for item in self.approved_session_summaries],
             "approved_plan_history": [item.to_dict() for item in self.approved_plan_history],
+            "approved_facial_movement_profiles": [
+                item.to_dict() for item in self.approved_facial_movement_profiles
+            ],
             "access_audit_records": self.access_audit_records,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

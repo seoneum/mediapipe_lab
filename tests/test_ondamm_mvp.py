@@ -13,7 +13,7 @@ if str(APP_DIR) not in sys.path:
 
 import ondamm_paths  # noqa: E402
 import ondamm_store  # noqa: E402
-from ondamm_models import Dossier, SessionSummary  # noqa: E402
+from ondamm_models import Dossier, FacialMovementProfile, SessionSummary  # noqa: E402
 from ondamm_recommendations import build_baseline_recommendation  # noqa: E402
 from ondamm_cli import render_handoff_markdown  # noqa: E402
 
@@ -103,6 +103,46 @@ class OnDammMvpTests(unittest.TestCase):
         self.assertIn("수동으로 continuity dossier를 다시 작성", markdown)
         self.assertIn("전환 전에 예고하면 안정적임", markdown)
         self.assertIn("분류 활동 1회차", markdown)
+
+    def test_approved_facial_movement_profile_round_trip_and_audit(self) -> None:
+        dossier = Dossier.create(
+            child_id="child-facial-profile",
+            display_name="Demo Child",
+            age_band="초등 저학년",
+            communication_modality="시각 단서",
+        )
+        profile = FacialMovementProfile.create(
+            label="lip_corner_pull",
+            display_name="입꼬리 당김 움직임",
+            blendshape_names=["mouthDimpleLeft", "mouthDimpleRight"],
+            aggregation="mean",
+            activation_threshold=0.35,
+            approved_by="teacher-a",
+            source_session_ids=["session-observation-a"],
+        )
+
+        dossier.add_facial_movement_profile(profile)
+        ondamm_store.create_dossier(dossier)
+
+        loaded = ondamm_store.load_dossier("child-facial-profile")
+        self.assertEqual(len(loaded.approved_facial_movement_profiles), 1)
+        saved = loaded.approved_facial_movement_profiles[0]
+        self.assertEqual(saved.label, "lip_corner_pull")
+        self.assertEqual(saved.status, "approved")
+        self.assertEqual(saved.source_session_ids, ["session-observation-a"])
+        self.assertEqual(loaded.access_audit_records[-1]["event_type"], "facial_movement_profile_approved")
+
+    def test_facial_profile_requires_approved_source_and_never_auto_updates(self) -> None:
+        with self.assertRaises(ValueError):
+            FacialMovementProfile.create(
+                label="lip_corner_pull",
+                display_name="입꼬리 당김 움직임",
+                blendshape_names=["mouthDimpleLeft"],
+                aggregation="max",
+                activation_threshold=0.35,
+                approved_by="",
+                source_session_ids=[],
+            )
 
 
 if __name__ == "__main__":

@@ -125,7 +125,9 @@ class OndammWebApiTests(unittest.TestCase):
         self.assertGreater(result["frame_count"], 0)
         self.assertFalse(result["storage_policy"]["raw_media_saved"])
         self.assertFalse(result["storage_policy"]["auto_writeback_to_dossier"])
-        self.assertEqual(result["expression_label_counts"], {"neutral": 24, "smile": 6})
+        self.assertEqual(result["expression_label_counts"], {"mouth_smile": 6, "neutral": 24})
+        self.assertEqual(result["facial_movement_counts"], {"mouth_smile": 6})
+        self.assertEqual(result["eye_closure_state_counts"], {"open_or_uncertain": 30})
         self.assertIn("교사 검토용", " ".join(result["reviewed_note_draft"]))
         self.assertEqual(self.service.get_dossier("child-api")["approved_session_summaries"], [])
 
@@ -182,6 +184,54 @@ class OndammWebApiTests(unittest.TestCase):
         self.assertTrue(integrations["openai"]["configured"])
         self.assertEqual(integrations["openai"]["model"], "fake-gpt")
         self.assertTrue(integrations["mediapipe"]["configured"])
+
+    def test_approved_session_backed_facial_profile_updates_dossier_and_runtime_contract(self) -> None:
+        session = self.service.add_session(
+            "child-api",
+            {
+                "title": "입꼬리 움직임 검토",
+                "activity_name": "표정 따라 하기",
+                "observed_response": "mouthDimple 계열 점수가 반복 관찰됨",
+                "educator_interpretation": "사용자별 움직임 규칙 후보로 검토함",
+                "approved_by": "teacher-a",
+                "tags": ["facial-movement-calibration"],
+            },
+        )
+
+        status, profile = self.router.dispatch(
+            "POST",
+            "/api/dossiers/child-api/facial-movement-profiles/approve",
+            {
+                "label": "lip_corner_pull",
+                "display_name": "입꼬리 당김 움직임",
+                "blendshape_names": ["mouthDimpleLeft", "mouthDimpleRight"],
+                "aggregation": "mean",
+                "activation_threshold": 0.35,
+                "approved_by": "teacher-a",
+                "source_session_ids": [session["session_id"]],
+            },
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(profile["status"], "approved")
+        saved = self.service.get_dossier("child-api")
+        self.assertEqual(saved["approved_facial_movement_profiles"][0]["label"], "lip_corner_pull")
+        self.assertEqual(saved["access_audit_records"][-1]["event_type"], "facial_movement_profile_approved")
+
+    def test_facial_profile_rejects_unknown_dossier_session(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.service.approve_facial_movement_profile(
+                "child-api",
+                {
+                    "label": "lip_corner_pull",
+                    "display_name": "입꼬리 당김 움직임",
+                    "blendshape_names": ["mouthDimpleLeft"],
+                    "aggregation": "max",
+                    "activation_threshold": 0.35,
+                    "approved_by": "teacher-a",
+                    "source_session_ids": ["missing-session"],
+                },
+            )
 
 
 if __name__ == "__main__":

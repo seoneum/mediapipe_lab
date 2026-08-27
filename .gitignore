@@ -1,7 +1,33 @@
 .venv/
+.venv_*/
 .uv-cache/
 __pycache__/
 *.pyc
 .DS_Store
 outputs/
 
+# Local package caches and tool/editor state
+.pip-cache/
+.idea/
+.vscode/
+.gjc/
+
+# Downloaded model weights
+models/*.task
+models/*.tflite
+models/*.pt
+models/dinov3/
+
+# Local/private runtime data
+data/ondamm/dossiers/
+data/ondamm/secrets/
+data/micro_expression/recordings/
+data/calib/
+*.key
+
+# Local research downloads and raw media
+research_sources/
+*.mp4
+*.mov
+*.avi
+*.mkv

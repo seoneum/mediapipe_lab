@@ -180,6 +180,10 @@ function renderCurrent() {
   $("#detail-strategies").innerHTML = chipMarkup(dossier.effective_strategies);
   $("#detail-supports").innerHTML = chipMarkup(dossier.triggers_and_calming_supports);
   $("#detail-handoff").innerHTML = noteMarkup(dossier.handoff_notes);
+  const facialProfiles = dossier.approved_facial_movement_profiles || [];
+  $("#detail-facial-profiles").innerHTML = facialProfiles.length
+    ? facialProfiles.map((profile) => `<div><strong>${escapeHtml(profile.display_name)}</strong> · ${escapeHtml(profile.blendshape_names.join(", "))} · threshold ${Number(profile.activation_threshold).toFixed(2)} · 승인 ${escapeHtml(profile.approved_by)}</div>`).join("")
+    : `<div class="empty-inline">기본 얼굴 움직임 규칙을 사용 중입니다. 승인된 개인화 프로필은 아직 없습니다.</div>`;
 
   renderSessions();
   renderPlans();
@@ -199,7 +203,7 @@ function renderSessions() {
 
   $("#session-list").innerHTML = sessions.length ? sessions.map((item) => `
     <article class="timeline-item">
-      <div class="timeline-meta"><time>${formatDate(item.created_at, true)}</time><span>승인 · ${escapeHtml(item.approved_by)}</span></div>
+      <div class="timeline-meta"><time>${formatDate(item.created_at, true)}</time><span>승인 · ${escapeHtml(item.approved_by)}</span><code>${escapeHtml(item.session_id)}</code></div>
       <div class="timeline-content"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.activity_name)} ${item.tags?.length ? `· ${item.tags.map(escapeHtml).join(" · ")}` : ""}</p>
         <div class="observation-pair"><div><strong>관찰한 반응</strong><span>${escapeHtml(item.observed_response)}</span></div><div><strong>교육자 해석</strong><span>${escapeHtml(item.educator_interpretation)}</span></div></div>
       </div>
@@ -219,6 +223,25 @@ function eventTypeName(value) {
 function expressionHintName(value) {
   return ({
     neutral: "두드러진 움직임 없음",
+    eyes_closed: "양눈 닫힘 움직임",
+    left_eye_closed: "왼눈 닫힘 움직임",
+    right_eye_closed: "오른눈 닫힘 움직임",
+    mouth_smile: "입꼬리 상승 움직임",
+    jaw_open: "턱 열림 움직임",
+    brow_raise: "눈썹 올림 움직임",
+    brow_lower: "눈썹 내림 움직임",
+    eye_squint: "눈 가늘게 뜸 움직임",
+    eyes_wide: "눈 크게 뜸 움직임",
+    mouth_frown: "입꼬리 하강 움직임",
+    lip_pucker: "입술 오므림 움직임",
+    lip_press: "입술 누름 움직임",
+    mouth_stretch: "입 늘림 움직임",
+    mouth_dimple: "입꼬리 당김 움직임",
+    cheek_puff: "볼 부풀림 움직임",
+    nose_sneer: "코 주변 올림 움직임",
+    mouth_left: "입 왼쪽 이동",
+    mouth_right: "입 오른쪽 이동",
+    tongue_out: "혀 내밈 움직임",
     smile: "입꼬리 상승 계열",
     surprise: "턱 열림·눈 크게 뜸 계열",
     blink: "눈 감김 계열",
@@ -385,6 +408,33 @@ $("#session-form").addEventListener("submit", async (event) => {
   } catch (error) { toast(error.message, "error"); }
 });
 
+$("#new-facial-profile-button").addEventListener("click", () => {
+  if (!state.current || state.current.canonical_status !== "active") return;
+  $("#facial-profile-dialog").showModal();
+});
+
+$("#facial-profile-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const body = {
+    label: data.get("label").trim(),
+    display_name: data.get("display_name").trim(),
+    blendshape_names: splitList(data.get("blendshape_names")),
+    aggregation: data.get("aggregation"),
+    activation_threshold: Number(data.get("activation_threshold")),
+    approved_by: data.get("approved_by").trim(),
+    source_session_ids: splitList(data.get("source_session_ids")),
+  };
+  try {
+    await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/facial-movement-profiles/approve`, { method: "POST", body });
+    $("#facial-profile-dialog").close(); event.currentTarget.reset();
+    event.currentTarget.elements.activation_threshold.value = "0.35";
+    event.currentTarget.elements.approved_by.value = "local-operator";
+    toast("승인된 얼굴 움직임 프로필을 기록철에 저장했습니다.");
+    await refreshCurrent(); setTab("dossier");
+  } catch (error) { toast(error.message, "error"); }
+});
+
 $("#recommendation-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
@@ -481,7 +531,7 @@ $("#sensing-form").addEventListener("submit", async (event) => {
     const result = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/sensing/demo`, {
       method: "POST", body: { duration_seconds: Number(data.get("duration_seconds")), audio_presence_note: data.get("audio_presence_note").trim() },
     });
-    const expressionHint = Object.entries(result.expression_label_counts || {}).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const expressionHint = Object.entries(result.facial_movement_counts || result.expression_label_counts || {}).sort((a, b) => b[1] - a[1])[0]?.[0];
     $("#sensing-result").innerHTML = `
       <div class="result-head"><div><p class="eyebrow">REVIEWED NOTE DRAFT</p><h3>관찰 메모 초안</h3></div><span class="draft-stamp">DRAFT</span></div>
       <div class="sensing-metrics"><div><span>프레임</span><strong>${result.frame_count}</strong></div><div><span>얼굴 존재</span><strong>${Math.round(result.face_present_ratio * 100)}%</strong></div><div><span>자세 추정</span><strong>${Math.round(result.pose_present_ratio * 100)}%</strong></div><div><span>표정 움직임</span><strong>${escapeHtml(expressionHintName(expressionHint))}</strong></div></div>

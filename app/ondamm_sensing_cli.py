@@ -21,8 +21,10 @@ from holistic_camera import (
     estimate_gaze,
     put_lines,
 )
+from ondamm_facial_movement import FacialMovementAnalysis, analyze_facial_movements, rules_from_approved_profiles
 from ondamm_paths import ONDAMM_EXPORTS
 from ondamm_sensing import ObservationTally, build_sensing_draft
+from ondamm_store import load_dossier
 from paths import HOLISTIC_MODEL, base_options
 
 POSE_LEFT_SHOULDER = 11
@@ -54,6 +56,7 @@ def build_preview_lines(
     posture_proxy: str,
     expression_label: str | None,
     blendshape_pairs: list[tuple[str, float]] | None,
+    facial_movement_analysis: FacialMovementAnalysis | None = None,
 ) -> list[str]:
     lines = [
         f"face={face_present}",
@@ -61,7 +64,19 @@ def build_preview_lines(
         f"gaze={gaze_zone}",
         f"posture={posture_proxy}",
     ]
-    if expression_label:
+    if facial_movement_analysis:
+        lines.append(f"eyes={facial_movement_analysis.eye_closure_state}")
+        lines.append(
+            "eyeBlink="
+            f"L:{facial_movement_analysis.eye_blink_left:.2f},R:{facial_movement_analysis.eye_blink_right:.2f}"
+        )
+        movements = ",".join(facial_movement_analysis.active_labels) or "neutral"
+        lines.append(f"movements={movements}")
+        shown = ", ".join(
+            f"{name}:{score:.2f}" for name, score in facial_movement_analysis.top_blendshapes[:5]
+        )
+        lines.append(f"blendshapes={shown}".rstrip())
+    elif expression_label:
         shown = ", ".join(f"{name}:{score:.2f}" for name, score in (blendshape_pairs or [])[:3])
         lines.append(f"expression={expression_label}  {shown}".rstrip())
     return lines
@@ -92,6 +107,12 @@ def save_outputs(output: Path, markdown_output: Path, draft: dict) -> None:
         "",
         "## Posture proxy counts",
         json.dumps(draft["posture_proxy_counts"], ensure_ascii=False, indent=2),
+        "",
+        "## Facial movement proxy counts",
+        json.dumps(draft.get("facial_movement_counts", {}), ensure_ascii=False, indent=2),
+        "",
+        "## Eye closure proxy counts",
+        json.dumps(draft.get("eye_closure_state_counts", {}), ensure_ascii=False, indent=2),
         "",
         "## Storage policy",
         json.dumps(draft["storage_policy"], ensure_ascii=False, indent=2),
@@ -130,6 +151,11 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
         min_hand_landmarks_confidence=0.5,
     )
     tally = ObservationTally()
+    try:
+        dossier = load_dossier(args.child_id)
+        movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
+    except FileNotFoundError:
+        movement_rules = rules_from_approved_profiles([])
     cap = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
@@ -155,14 +181,23 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
             posture_proxy = posture_proxy_from_landmarks(pose_landmarks) if pose_landmarks is not None else "unavailable"
             expression_label = None
             blendshape_pairs = None
+            movement_analysis = None
             if result.face_blendshapes:
-                expression_label, blendshape_pairs = estimate_expression(result.face_blendshapes, 3)
+                movement_analysis = analyze_facial_movements(
+                    result.face_blendshapes,
+                    rules=movement_rules,
+                    top_limit=10,
+                )
+                expression_label = movement_analysis.primary_label
+                blendshape_pairs = list(movement_analysis.top_blendshapes)
             tally.add_frame(
                 face_present=face_landmarks is not None,
                 pose_present=pose_landmarks is not None,
                 gaze_zone=gaze_zone,
                 posture_proxy=posture_proxy,
                 expression_label=expression_label,
+                facial_movement_labels=list(movement_analysis.active_labels) if movement_analysis else None,
+                eye_closure_state=movement_analysis.eye_closure_state if movement_analysis else None,
             )
             if not args.headless:
                 preview = frame.copy()
@@ -188,6 +223,7 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
                         posture_proxy=posture_proxy,
                         expression_label=expression_label,
                         blendshape_pairs=blendshape_pairs,
+                        facial_movement_analysis=movement_analysis,
                     ),
                 )
                 cv2.imshow("ON DAMM sensing draft", preview)

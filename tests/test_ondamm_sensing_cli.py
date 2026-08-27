@@ -9,6 +9,7 @@ APP_DIR = ROOT / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from ondamm_facial_movement import analyze_facial_movements  # noqa: E402
 from ondamm_sensing_cli import build_preview_lines  # noqa: E402
 
 
@@ -43,6 +44,31 @@ class OnDammSensingCliTests(unittest.TestCase):
             "gaze=unknown",
             "posture=unavailable",
         ])
+
+    def test_preview_prioritizes_eye_closure_and_lists_multiple_movement_hints(self) -> None:
+        class Category:
+            def __init__(self, name, score):
+                self.category_name = name
+                self.score = score
+
+        analysis = analyze_facial_movements([
+            Category("eyeBlinkLeft", 0.5),
+            Category("eyeBlinkRight", 0.46),
+            Category("mouthSmileLeft", 0.8),
+            Category("mouthSmileRight", 0.82),
+        ])
+        lines = build_preview_lines(
+            face_present=True,
+            pose_present=True,
+            gaze_zone="center",
+            posture_proxy="centered",
+            expression_label=None,
+            blendshape_pairs=None,
+            facial_movement_analysis=analysis,
+        )
+
+        self.assertIn("eyes=both_closed", lines)
+        self.assertTrue(any("movements=eyes_closed,mouth_smile" in line for line in lines))
 
 
 if __name__ == "__main__":

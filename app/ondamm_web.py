@@ -16,7 +16,7 @@ from uuid import uuid4
 from ondamm_cli import render_handoff_markdown
 from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
-from ondamm_models import Dossier, SessionSummary, unique_preserving_order
+from ondamm_models import Dossier, FacialMovementProfile, SessionSummary, unique_preserving_order
 from ondamm_recommendations import build_baseline_recommendation
 from ondamm_review import LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
 from ondamm_security import build_export_manifest
@@ -138,6 +138,36 @@ class OndammWebService:
         save_dossier(dossier)
         return summary.to_dict()
 
+    def approve_facial_movement_profile(self, child_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "approve facial movement profile")
+        source_session_ids = text_list(payload, "source_session_ids")
+        approved_session_ids = {item.session_id for item in dossier.approved_session_summaries}
+        if not source_session_ids or not set(source_session_ids).issubset(approved_session_ids):
+            raise ValidationError("source_session_ids must reference approved dossier session summaries")
+        raw_threshold = payload.get("activation_threshold")
+        if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
+            raise ValidationError("activation_threshold must be a number")
+        raw_priority = payload.get("priority", 80)
+        if isinstance(raw_priority, bool) or not isinstance(raw_priority, int):
+            raise ValidationError("priority must be an integer")
+        try:
+            profile = FacialMovementProfile.create(
+                label=required_text(payload, "label"),
+                display_name=required_text(payload, "display_name"),
+                blendshape_names=text_list(payload, "blendshape_names"),
+                aggregation=required_text(payload, "aggregation"),
+                activation_threshold=float(raw_threshold),
+                approved_by=required_text(payload, "approved_by"),
+                source_session_ids=source_session_ids,
+                priority=raw_priority,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        dossier.add_facial_movement_profile(profile)
+        save_dossier(dossier)
+        return profile.to_dict()
+
     def preview_recommendation(self, child_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         dossier = load_dossier(self._validate_child_id(child_id))
         ensure_active(dossier, "preview recommendation")
@@ -196,6 +226,8 @@ class OndammWebService:
                 gaze_zone="center",
                 posture_proxy="centered",
                 expression_label="neutral",
+                facial_movement_labels=[],
+                eye_closure_state="open_or_uncertain",
             )
         for _ in range(6):
             tally.add_frame(
@@ -203,7 +235,9 @@ class OndammWebService:
                 pose_present=False,
                 gaze_zone="left",
                 posture_proxy="unavailable",
-                expression_label="smile",
+                expression_label="mouth_smile",
+                facial_movement_labels=["mouth_smile"],
+                eye_closure_state="open_or_uncertain",
             )
         return build_sensing_draft(
             child_id=dossier.child_id,
@@ -390,6 +424,8 @@ class ApiRouter:
                 return 200, self.service.review_local_clip_with_gpt(child_id, segments[4], body)
             if len(segments) == 4 and segments[3] == "sessions" and method == "POST":
                 return 201, self.service.add_session(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["facial-movement-profiles", "approve"] and method == "POST":
+                return 201, self.service.approve_facial_movement_profile(child_id, body)
             if len(segments) == 5 and segments[3:] == ["recommendations", "preview"] and method == "POST":
                 return 200, self.service.preview_recommendation(child_id, body)
             if len(segments) == 5 and segments[3:] == ["recommendations", "approve"] and method == "POST":

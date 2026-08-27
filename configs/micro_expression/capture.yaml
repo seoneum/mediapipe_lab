@@ -1,0 +1,20 @@
+video:
+  target_fps: 60
+  preferred_width: 1920
+  preferred_height: 1080
+
+face:
+  num_faces: 1
+  min_face_detection_confidence: 0.5
+  min_face_presence_confidence: 0.5
+  min_tracking_confidence: 0.5
+
+recording:
+  calibration_seconds: 15
+
+analysis:
+  use_all_frames: true
+  use_blendshapes: true
+  use_landmarks: true
+  use_head_transform: true
+  use_optical_flow: true
