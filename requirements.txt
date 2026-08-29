@@ -1,5 +1,5 @@
 # MediaPipe Python Tasks 핵심 패키지
-mediapipe
+mediapipe==1.0.0
 
 # OpenCV 카메라/이미지 입출력. mediapipe 의존성과 맞추기 위해 contrib 판 사용.
 opencv-contrib-python

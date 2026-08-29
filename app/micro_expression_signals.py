@@ -746,6 +746,30 @@ class DinoSignals:
         )
 
 
+class DisabledDinoSignals:
+    """No-op DINO adapter for MediaPipe-only live/demo operation."""
+
+    baseline = None
+    latest_features = None
+    last_inference_ms = 0.0
+
+    def extract(self, bgr_crop):
+        return None
+
+    def capture_baseline(self):
+        return False
+
+    def reset_baseline(self):
+        return None
+
+    @property
+    def has_baseline(self):
+        return False
+
+    def change_map(self):
+        return None
+
+
 # ============================================================
 # Unified extractor
 # ============================================================
@@ -756,13 +780,19 @@ class MicroExpressionSignalExtractor:
         *,
         dino_every=3,
         model_path=MP_MODEL,
+        enable_dino=True,
     ):
         self.dino_every = max(
             1,
             int(dino_every),
         )
 
-        self.dino = DinoSignals()
+        self.dino = (
+            DinoSignals()
+            if enable_dino
+            else DisabledDinoSignals()
+        )
+        self.dino_enabled = bool(enable_dino)
 
         self.prev_canonical = None
 
@@ -1009,6 +1039,8 @@ class MicroExpressionSignalExtractor:
 
 
         if (
+            self.dino_enabled
+            and
             crop is not None
             and frame_idx
             % self.dino_every

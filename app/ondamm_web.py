@@ -17,6 +17,7 @@ from ondamm_cli import render_handoff_markdown
 from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
 from ondamm_models import Dossier, FacialMovementProfile, SessionSummary, unique_preserving_order
+from ondamm_pattern_memory import PatternMemoryStore
 from ondamm_recommendations import build_baseline_recommendation
 from ondamm_review import EventReviewStore, LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
 from ondamm_security import build_export_manifest
@@ -78,6 +79,7 @@ class OndammWebService:
         clip_analyzer: Callable[[Path], dict[str, Any]] = analyze_clip_with_mediapipe,
         gpt_reviewer: Any | None = None,
         frame_extractor: Callable[[Path], list[str]] = extract_video_frame_data_urls,
+        pattern_memory_root: Path | None = None,
     ) -> None:
         self.clip_catalog = clip_catalog or LocalClipCatalog(Path(ondamm_paths.ONDAMM_EXPORTS))
         self.event_review_store = event_review_store or EventReviewStore(
@@ -85,6 +87,9 @@ class OndammWebService:
         )
         self.clip_analyzer = clip_analyzer
         self.frame_extractor = frame_extractor
+        self.pattern_memory_root = (
+            pattern_memory_root or (Path(ondamm_paths.ONDAMM_EXPORTS) / "pattern-memory")
+        ).expanduser().resolve()
         self._browser_media_cache: dict[str, Path] = {}
         if gpt_reviewer is not None:
             self.gpt_reviewer = gpt_reviewer
@@ -309,6 +314,100 @@ class OndammWebService:
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
 
+    def list_temporal_patterns(self, child_id: str) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "read temporal pattern memory")
+        try:
+            result = self._pattern_memory(dossier.child_id).public_state()
+            result["configured"] = True
+            return result
+        except FileNotFoundError:
+            return {
+                "schema_version": 1,
+                "child_id": dossier.child_id,
+                "configured": False,
+                "known_patterns": [],
+                "candidates": [],
+                "suppressed": [],
+                "raw_media_saved_for_unpromoted_counts": False,
+                "online_tcn_retraining": False,
+                "message": "Temporal encoder runtime has not created a local pattern memory yet.",
+            }
+
+    def promote_temporal_candidate(
+        self,
+        child_id: str,
+        candidate_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "promote temporal movement candidate")
+        store = self._pattern_memory(dossier.child_id)
+        clip = self._candidate_clip(dossier.child_id, candidate_id, required_text(payload, "clip_id"))
+        review = self.event_review_store.get_bundle(child_id=dossier.child_id, clip=clip)
+        if not review["summary"]["ready_for_human_promotion"]:
+            raise RuntimeError("three-role consensus_accepted review is required before promotion")
+        try:
+            pattern = store.promote_candidate(
+                candidate_id=candidate_id,
+                display_name=required_text(payload, "display_name"),
+                approved_by=required_text(payload, "approved_by"),
+                source_event_ids=[clip.event_id],
+                distance_threshold=payload.get("distance_threshold"),
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        dossier.add_audit_event(
+            event_type="temporal_movement_pattern_approved",
+            actor_id=pattern["approved_by"],
+            details={
+                "pattern_id": pattern["pattern_id"],
+                "prototype_digest": pattern["prototype_digest"],
+                "encoder_digest": pattern["encoder_digest"],
+                "source_event_ids": pattern["source_event_ids"],
+                "model_store": "outputs/ondamm/pattern-memory",
+            },
+        )
+        save_dossier(dossier)
+        return pattern
+
+    def suppress_temporal_candidate(
+        self,
+        child_id: str,
+        candidate_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "suppress temporal movement candidate")
+        clip = self._candidate_clip(dossier.child_id, candidate_id, required_text(payload, "clip_id"))
+        review = self.event_review_store.get_bundle(child_id=dossier.child_id, clip=clip)
+        if review["summary"]["status"] != "consensus_rejected":
+            raise RuntimeError("three-role consensus_rejected review is required before suppression")
+        try:
+            record = self._pattern_memory(dossier.child_id).suppress_candidate(
+                candidate_id=candidate_id,
+                approved_by=required_text(payload, "approved_by"),
+                reason=required_text(payload, "reason"),
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        dossier.add_audit_event(
+            event_type="temporal_movement_pattern_suppressed",
+            actor_id=record["approved_by"],
+            details={
+                "suppression_id": record["suppression_id"],
+                "source_candidate_id": candidate_id,
+                "prototype_digest": record["prototype_digest"],
+            },
+        )
+        save_dossier(dossier)
+        return record
+
+    def watch_temporal_candidate(self, child_id: str, candidate_id: str) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "keep temporal movement candidate under observation")
+        return self._pattern_memory(dossier.child_id).mark_watch(candidate_id=candidate_id)
+
     def review_local_clip_with_gpt(
         self,
         child_id: str,
@@ -352,6 +451,15 @@ class OndammWebService:
                 "requires_explicit_frame_consent": True,
             },
         }
+
+    def _pattern_memory(self, child_id: str) -> PatternMemoryStore:
+        return PatternMemoryStore.open_existing(self.pattern_memory_root, child_id=child_id)
+
+    def _candidate_clip(self, child_id: str, candidate_id: str, clip_id: str):
+        clip = self.clip_catalog.resolve_clip(clip_id, child_id=child_id)
+        if clip.trigger_values.get("candidate_id") != candidate_id:
+            raise ValidationError("clip does not belong to the selected temporal candidate")
+        return clip
 
     def change_status(self, child_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         dossier = load_dossier(self._validate_child_id(child_id))
@@ -445,6 +553,17 @@ class ApiRouter:
                 return 200, self.service.get_dossier(child_id)
             if len(segments) == 4 and segments[3] == "clips" and method == "GET":
                 return 200, self.service.list_local_clips(child_id)
+            if len(segments) == 4 and segments[3] == "patterns" and method == "GET":
+                return 200, self.service.list_temporal_patterns(child_id)
+            if len(segments) == 7 and segments[3] == "patterns" and segments[4] == "candidates" and method == "POST":
+                candidate_id = segments[5]
+                action = segments[6]
+                if action == "promote":
+                    return 201, self.service.promote_temporal_candidate(child_id, candidate_id, body)
+                if action == "suppress":
+                    return 201, self.service.suppress_temporal_candidate(child_id, candidate_id, body)
+                if action == "watch":
+                    return 200, self.service.watch_temporal_candidate(child_id, candidate_id)
             if len(segments) == 6 and segments[3] == "clips" and segments[5] == "mediapipe" and method == "POST":
                 return 200, self.service.analyze_local_clip(child_id, segments[4])
             if len(segments) == 6 and segments[3] == "clips" and segments[5] == "gpt-review" and method == "POST":

@@ -213,26 +213,93 @@ class LocalEventClipRecorder:
         policy: EventRecordingPolicy | None = None,
         output_dir: Path | None = None,
         recording_enabled: bool = False,
+        buffer_enabled: bool | None = None,
+        persist_enabled: bool | None = None,
+        output_format: str = "npz",
+        fps: float | None = None,
     ) -> None:
         self.policy = policy or EventRecordingPolicy()
         self.output_dir = output_dir
-        self.recording_enabled = recording_enabled
+        self.buffer_enabled = recording_enabled if buffer_enabled is None else bool(buffer_enabled)
+        self.persist_enabled = recording_enabled if persist_enabled is None else bool(persist_enabled)
+        # Backward-compatible public attribute used by ondamm_learning_cli.
+        self.recording_enabled = self.persist_enabled
+        if output_format not in {"npz", "mp4"}:
+            raise ValueError("output_format must be 'npz' or 'mp4'")
+        if fps is not None and fps <= 0:
+            raise ValueError("fps must be positive")
+        self.output_format = output_format
+        self.fps = float(fps) if fps is not None else None
         self._frames: deque[_BufferedFrame] = deque()
+        self._pending_events: dict[str, EventMetadata] = {}
 
     def add_frame(self, *, frame: np.ndarray, timestamp: float) -> None:
-        if not self.recording_enabled:
+        if not self.buffer_enabled:
             return
         self._frames.append(_BufferedFrame(timestamp=float(timestamp), frame=np.array(frame, copy=True)))
         self._prune_frames(current_timestamp=float(timestamp))
 
     def record_event(self, event: EventMetadata) -> EventMetadata:
-        if not self.recording_enabled or self.output_dir is None:
+        """Persist now when no tail is requested, otherwise queue delayed finalization.
+
+        Buffering and disk persistence are intentionally separate.  A runtime may
+        keep a short, ephemeral RAM buffer while candidate occurrences remain
+        metadata-only, then call this method only after the recurrence policy has
+        crossed its clip threshold.
+        """
+        if not self.persist_enabled or self.output_dir is None:
+            return event
+        if self.policy.clip_tail_seconds > 0:
+            self._pending_events.setdefault(event.event_id, event)
+            return event
+        return self._persist_event(event)
+
+    def finalize_ready(self, *, current_timestamp: float) -> list[EventMetadata]:
+        """Write pending clips only after their post-event tail exists in RAM."""
+        ready: list[EventMetadata] = []
+        for event_id, event in list(self._pending_events.items()):
+            required_until = event.end_timestamp + self.policy.clip_tail_seconds
+            if float(current_timestamp) + 1e-9 < required_until:
+                continue
+            ready.append(self._persist_event(event))
+            del self._pending_events[event_id]
+        return ready
+
+    def flush_pending(self, *, current_timestamp: float, allow_incomplete_tail: bool = False) -> list[EventMetadata]:
+        """Finalize ready clips at shutdown; incomplete tails stay pending by default."""
+        if not allow_incomplete_tail:
+            return self.finalize_ready(current_timestamp=current_timestamp)
+        completed: list[EventMetadata] = []
+        for event_id, event in list(self._pending_events.items()):
+            completed.append(self._persist_event(event, clip_end_override=float(current_timestamp)))
+            del self._pending_events[event_id]
+        return completed
+
+    @property
+    def buffered_frame_count(self) -> int:
+        return len(self._frames)
+
+    @property
+    def pending_event_count(self) -> int:
+        return len(self._pending_events)
+
+    def _persist_event(
+        self,
+        event: EventMetadata,
+        *,
+        clip_end_override: float | None = None,
+    ) -> EventMetadata:
+        if not self.persist_enabled or self.output_dir is None:
             return event
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        clip_frames = self._select_frames(event)
+        clip_frames = self._select_frames(event, clip_end_override=clip_end_override)
         if not clip_frames:
             return event
+
+        if self.output_format == "mp4":
+            clip_path = self._write_mp4(event, clip_frames)
+            return event.with_clip_path(str(clip_path))
 
         clip_path = self.output_dir / f"{event.event_id}.npz"
         frames = np.stack([entry.frame for entry in clip_frames])
@@ -253,10 +320,68 @@ class LocalEventClipRecorder:
         )
         return event.with_clip_path(str(clip_path))
 
-    def _select_frames(self, event: EventMetadata) -> list[_BufferedFrame]:
+    def _write_mp4(self, event: EventMetadata, clip_frames: list[_BufferedFrame]) -> Path:
+        import cv2
+
+        first = clip_frames[0].frame
+        if first.ndim == 2:
+            first = cv2.cvtColor(first, cv2.COLOR_GRAY2BGR)
+        elif first.ndim == 3 and first.shape[2] == 4:
+            first = cv2.cvtColor(first, cv2.COLOR_BGRA2BGR)
+        if first.ndim != 3 or first.shape[2] != 3:
+            raise ValueError("event frames must be grayscale, BGR, or BGRA images")
+        height, width = first.shape[:2]
+        fps = self.fps or self._estimate_fps(clip_frames)
+        clip_path = self.output_dir / f"{event.event_id}.mp4"
+        temporary = self.output_dir / f".{event.event_id}.tmp.mp4"
+        writer = cv2.VideoWriter(
+            str(temporary),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError(f"Could not open video writer for {clip_path}")
+        try:
+            for entry in clip_frames:
+                frame = entry.frame
+                if frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                elif frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                if frame.shape[:2] != (height, width):
+                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                writer.write(frame)
+        finally:
+            writer.release()
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError(f"Event clip writer produced no data: {clip_path}")
+        temporary.replace(clip_path)
+        return clip_path
+
+    def _select_frames(
+        self,
+        event: EventMetadata,
+        *,
+        clip_end_override: float | None = None,
+    ) -> list[_BufferedFrame]:
         clip_start = max(0.0, event.start_timestamp - self.policy.pre_event_buffer_seconds)
-        clip_end = event.end_timestamp + self.policy.clip_tail_seconds
+        clip_end = (
+            float(clip_end_override)
+            if clip_end_override is not None
+            else event.end_timestamp + self.policy.clip_tail_seconds
+        )
         return [entry for entry in self._frames if clip_start <= entry.timestamp <= clip_end]
+
+    def _estimate_fps(self, clip_frames: list[_BufferedFrame]) -> float:
+        if len(clip_frames) < 2:
+            return 30.0
+        deltas = np.diff(np.array([entry.timestamp for entry in clip_frames], dtype=float))
+        positive = deltas[deltas > 1e-9]
+        if not len(positive):
+            return 30.0
+        return float(np.clip(1.0 / np.median(positive), 1.0, 240.0))
 
     def _prune_frames(self, *, current_timestamp: float) -> None:
         threshold = current_timestamp - self.policy.history_window_seconds()

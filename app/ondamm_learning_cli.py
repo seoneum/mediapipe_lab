@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -15,7 +16,7 @@ import numpy as np
 from ondamm_event_recording import EventMetadata, EventObservation, EventRecordingPolicy, LocalEventClipRecorder, SustainedEventDetector
 from ondamm_learning import build_learning_program_plan, build_learning_run_summary, render_learning_program_markdown, render_learning_run_summary_markdown
 from ondamm_models import Dossier, unique_preserving_order, utc_now
-from ondamm_paths import ONDAMM_LEARNING_EXPORTS
+from ondamm_paths import ONDAMM_EXPORTS, ONDAMM_LEARNING_EXPORTS
 from ondamm_store import load_dossier
 
 
@@ -54,6 +55,8 @@ class RunCapture:
     detected_events: list[EventMetadata]
     recorded_events: list[EventMetadata]
     clip_directory: str | None
+    temporal_enabled: bool = False
+    temporal_checkpoint: str | None = None
 
 
 def slugify(value: str) -> str:
@@ -65,6 +68,29 @@ def dominant_key(counts: Counter[str], fallback: str) -> str:
     if not counts:
         return fallback
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def append_unique_events(target: list[EventMetadata], events: list[EventMetadata] | tuple[EventMetadata, ...]) -> None:
+    known = {event.event_id for event in target}
+    for event in events:
+        if event.event_id not in known:
+            target.append(event)
+            known.add(event.event_id)
+
+
+def resolve_temporal_checkpoint(value: str | None) -> Path | None:
+    if value:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing --temporal-checkpoint: {path}")
+        return path
+    root = Path(__file__).resolve().parents[1] / "outputs" / "micro_expression" / "v4_tcn"
+    candidates = sorted(
+        root.glob("encoder_*.pt"),
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+    return candidates[0].resolve() if candidates else None
 
 
 def deterministic_demo_started_at() -> str:
@@ -132,6 +158,8 @@ def serialize_run_summary(summary, capture: RunCapture, output_dir: Path) -> dic
     payload["event_count"] = len(capture.detected_events)
     payload["recorded_event_count"] = len(capture.recorded_events)
     payload["event_clip_directory"] = capture.clip_directory
+    payload["temporal_enabled"] = capture.temporal_enabled
+    payload["temporal_checkpoint"] = capture.temporal_checkpoint
     payload["raw_media_notice"] = RAW_MEDIA_NOTICE
     payload["auto_writeback_notice"] = AUTO_WRITEBACK_NOTICE
     payload["output_dir"] = str(output_dir)
@@ -259,16 +287,19 @@ def run_demo_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorder,
     )
 
 
-def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorder, detector: SustainedEventDetector) -> RunCapture:
+def run_camera_mode(
+    args: argparse.Namespace,
+    *,
+    recorder: LocalEventClipRecorder,
+    detector: SustainedEventDetector,
+    temporal_demo=None,
+) -> RunCapture:
     import cv2
-    import mediapipe as mp
-    from mediapipe.tasks.python import vision
-    from mediapipe.tasks.python.vision import holistic_landmarker
 
-    from holistic_camera import estimate_gaze
+    from holistic_camera import classify_gaze_direction
+    from micro_expression_signals import MicroExpressionSignalExtractor
+    from ondamm_demo_overlay import render_demo_overlay
     from ondamm_facial_movement import analyze_facial_movements, rules_from_approved_profiles
-    from ondamm_sensing_cli import posture_proxy_from_landmarks
-    from paths import HOLISTIC_MODEL, base_options
 
     started_at = utc_now()
     wall_started = time.time()
@@ -277,47 +308,63 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
     recorded_events: list[EventMetadata] = []
     dossier = load_dossier(args.child_id)
     movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
-    options = holistic_landmarker.HolisticLandmarkerOptions(
-        base_options=base_options(HOLISTIC_MODEL),
-        running_mode=vision.RunningMode.VIDEO,
-        output_face_blendshapes=bool(args.movement_label),
-        min_face_detection_confidence=0.5,
-        min_face_landmarks_confidence=0.5,
-        min_pose_detection_confidence=0.5,
-        min_pose_landmarks_confidence=0.5,
-        min_hand_landmarks_confidence=0.5,
+    extractor = MicroExpressionSignalExtractor(
+        dino_every=args.dino_every,
+        enable_dino=args.demo_dino,
     )
-    cap = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
+    backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
+    cap = cv2.VideoCapture(args.camera, backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     if not cap.isOpened():
+        extractor.close()
         raise RuntimeError(f"Could not open camera index {args.camera}")
 
-    with holistic_landmarker.HolisticLandmarker.create_from_options(options) as landmarker:
+    frame_index = 0
+    previous_loop = time.perf_counter()
+    fps_ema = 0.0
+    timestamp_ms = -1
+    elapsed = 0.0
+    print("demo_controls: ESC/Q stop" + (", B capture DINO baseline" if args.demo_dino else ""))
+    try:
         while time.time() - wall_started < args.duration_seconds:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
             elapsed = round(time.time() - wall_started, 3)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = landmarker.detect_for_video(
-                mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
-                int(elapsed * 1000),
-            )
-            face_landmarks = result.face_landmarks or None
-            pose_landmarks = result.pose_landmarks or None
+            now_loop = time.perf_counter()
+            instant_fps = 1.0 / max(now_loop - previous_loop, 1e-6)
+            previous_loop = now_loop
+            fps_ema = instant_fps if frame_index == 0 else 0.9 * fps_ema + 0.1 * instant_fps
+            timestamp_ms = max(timestamp_ms + 1, int(elapsed * 1000))
+            signal = extractor.extract(frame, frame_index, timestamp_ms)
+            face_present = bool(signal.get("face_detected"))
             gaze_zone = "unknown"
-            if face_landmarks is not None:
-                gaze = estimate_gaze(face_landmarks)
-                gaze_zone = gaze["direction"] if gaze else "unknown"
-            posture_proxy = posture_proxy_from_landmarks(pose_landmarks) if pose_landmarks is not None else "unavailable"
-            face_present = face_landmarks is not None
+            gaze = signal.get("gaze")
+            if isinstance(gaze, dict):
+                gaze_zone = classify_gaze_direction(gaze["horizontal"], gaze["vertical"])
+            posture_proxy = "unavailable"
             movement_labels: tuple[str, ...] = ()
-            if args.movement_label and result.face_blendshapes:
-                movement_analysis = analyze_facial_movements(result.face_blendshapes, rules=movement_rules)
+            if face_present and signal.get("blendshapes"):
+                movement_analysis = analyze_facial_movements(signal["blendshapes"], rules=movement_rules)
                 movement_labels = tuple(movement_analysis.active_labels)
             observations.add(face_present=face_present, gaze_zone=gaze_zone, posture_proxy=posture_proxy)
-            recorder.add_frame(frame=frame, timestamp=elapsed)
+
+            status_before = (
+                temporal_demo.overlay_status(timestamp=elapsed)
+                if temporal_demo is not None
+                else {
+                    "temporal_enabled": False,
+                    "occurrence_threshold": args.temporal_min_occurrences,
+                }
+            )
+            status_before["fps"] = fps_ema
+            recorded_frame = (
+                render_demo_overlay(frame, signal, status_before)
+                if args.debug_overlay
+                else frame
+            )
+            recorder.add_frame(frame=recorded_frame, timestamp=elapsed)
             detector_events = detector.add_observation(
                 EventObservation(
                     timestamp=elapsed,
@@ -330,22 +377,47 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
             detected_events.extend(detector_events)
             recorded_events.extend(record_emitted_events(detector_events=detector_events, recorder=recorder, clip_fps=args.clip_fps))
 
-            if not args.headless:
-                preview = frame.copy()
-                cv2.putText(preview, f"face={face_present}", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
-                cv2.putText(preview, f"gaze={gaze_zone}", (16, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
-                cv2.putText(preview, f"posture={posture_proxy}", (16, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
-                if args.movement_label:
-                    cv2.putText(preview, f"movement={','.join(movement_labels) or 'none'}", (16, 128), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
-                cv2.imshow("ON DAMM learning", preview)
-                if cv2.waitKey(1) & 0xFF == 27:
-                    break
+            if temporal_demo is not None:
+                temporal_result = temporal_demo.process(
+                    timestamp=elapsed,
+                    signal=signal,
+                    frame_for_record=recorded_frame,
+                )
+                append_unique_events(detected_events, temporal_result.requested_events)
+                append_unique_events(recorded_events, temporal_result.finalized_events)
 
-    cap.release()
-    if not args.headless:
-        cv2.destroyAllWindows()
+            if not args.headless:
+                if args.debug_overlay:
+                    status_after = (
+                        temporal_demo.overlay_status(timestamp=elapsed)
+                        if temporal_demo is not None
+                        else status_before
+                    )
+                    status_after["fps"] = fps_ema
+                    preview = render_demo_overlay(frame, signal, status_after)
+                else:
+                    preview = frame.copy()
+                    cv2.putText(preview, f"face={face_present}", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
+                    cv2.putText(preview, f"gaze={gaze_zone}", (16, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
+                    cv2.putText(preview, f"movement={','.join(movement_labels) or 'none'}", (16, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
+                cv2.imshow("ON DAMM live micro-motion demo", preview)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q"), ord("Q")):
+                    break
+                if key in (ord("b"), ord("B")) and args.demo_dino:
+                    extractor.capture_baseline()
+            frame_index += 1
+    finally:
+        if temporal_demo is not None:
+            temporal_result = temporal_demo.close(timestamp=elapsed)
+            append_unique_events(detected_events, temporal_result.requested_events)
+            append_unique_events(recorded_events, temporal_result.finalized_events)
+        extractor.close()
+        cap.release()
+        if not args.headless:
+            cv2.destroyAllWindows()
     return RunCapture(
-        mode="camera",
+        mode="camera-temporal-demo" if temporal_demo is not None else "camera",
         started_at=started_at,
         finished_at=utc_now(),
         duration_seconds=round(time.time() - wall_started, 3),
@@ -353,6 +425,8 @@ def run_camera_mode(args: argparse.Namespace, *, recorder: LocalEventClipRecorde
         detected_events=detected_events,
         recorded_events=recorded_events,
         clip_directory=str(recorder.output_dir) if args.record_events and recorder.output_dir else None,
+        temporal_enabled=temporal_demo is not None,
+        temporal_checkpoint=str(temporal_demo.checkpoint_path) if temporal_demo is not None else None,
     )
 
 
@@ -438,6 +512,8 @@ def build_manifest(*, dossier: Dossier, capture: RunCapture, output_dir: Path, p
         "dossier_auto_updated": False,
         "detected_event_count": len(capture.detected_events),
         "recorded_event_count": len(capture.recorded_events),
+        "temporal_enabled": capture.temporal_enabled,
+        "temporal_checkpoint": capture.temporal_checkpoint,
         "support_boundary_notice": "학습 프로그램/실행 요약은 지원용 기록이며 진단 또는 자동 canonical 기록이 아닙니다.",
         "raw_media_notice": RAW_MEDIA_NOTICE,
         "plan_outputs": {name: str(path) for name, path in plan_paths.items()},
@@ -456,10 +532,26 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=1)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
-    parser.add_argument("--clip-fps", type=float, default=10.0)
+    parser.add_argument("--clip-fps", type=float, default=30.0)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--debug-overlay", action="store_true", help="Render and record the ON DAMM landmark/demo overlay")
+    parser.add_argument("--demo-dino", action="store_true", help="Enable optional local DINO heatmap inference")
+    parser.add_argument("--dino-every", type=int, default=3)
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--record-events", action="store_true")
+    parser.add_argument("--temporal-checkpoint", help="Frozen causal TCN encoder checkpoint; newest local encoder_*.pt is auto-selected")
+    parser.add_argument("--no-temporal", action="store_true", help="Disable temporal pattern discovery even if a checkpoint exists")
+    parser.add_argument("--require-temporal", action="store_true", help="Fail instead of falling back when no temporal checkpoint exists")
+    parser.add_argument("--pattern-memory-root", default=str(ONDAMM_EXPORTS / "pattern-memory"))
+    parser.add_argument("--temporal-calibration-seconds", type=float, default=3.0)
+    parser.add_argument("--temporal-onset-z", type=float, default=4.0)
+    parser.add_argument("--temporal-offset-z", type=float, default=2.0)
+    parser.add_argument("--temporal-min-episode-seconds", type=float, default=0.2)
+    parser.add_argument("--temporal-refractory-seconds", type=float, default=0.5)
+    parser.add_argument("--temporal-min-occurrences", type=int, default=3)
+    parser.add_argument("--temporal-strong-occurrences", type=int, default=5)
+    parser.add_argument("--temporal-pre-seconds", type=float, default=1.5)
+    parser.add_argument("--temporal-post-seconds", type=float, default=1.0)
     parser.add_argument(
         "--movement-label",
         action="append",
@@ -477,6 +569,20 @@ def main() -> None:
         raise ValueError("--duration-seconds must be positive")
     if args.movement_min_seconds <= 0:
         raise ValueError("--movement-min-seconds must be positive")
+    if args.dino_every <= 0:
+        raise ValueError("--dino-every must be positive")
+    if args.temporal_calibration_seconds < 0:
+        raise ValueError("--temporal-calibration-seconds must be non-negative")
+    if args.temporal_onset_z <= 0 or not 0 <= args.temporal_offset_z < args.temporal_onset_z:
+        raise ValueError("temporal z thresholds require 0 <= offset < onset")
+    if args.temporal_min_episode_seconds <= 0 or args.temporal_refractory_seconds < 0:
+        raise ValueError("temporal episode durations are invalid")
+    if args.temporal_min_occurrences < 2:
+        raise ValueError("--temporal-min-occurrences must be at least two")
+    if args.temporal_strong_occurrences < args.temporal_min_occurrences:
+        raise ValueError("--temporal-strong-occurrences must be >= --temporal-min-occurrences")
+    if args.temporal_pre_seconds < 0 or args.temporal_post_seconds < 0:
+        raise ValueError("temporal clip pre/post seconds must be non-negative")
 
     dossier = load_dossier(args.child_id)
     if args.movement_label:
@@ -497,13 +603,58 @@ def main() -> None:
     output_dir = resolve_output_dir(args, dossier)
     clips_dir = resolve_clips_dir(output_dir)
     prepare_output_dirs(output_dir, clips_dir, record_events=args.record_events)
+    event_metadata_path = output_dir / "event_recording.json" if args.record_events else None
     policy = EventRecordingPolicy(
         facial_movement_min_seconds=args.movement_min_seconds,
         target_facial_movement_labels=tuple(unique_preserving_order(args.movement_label)),
     )
     recorder = LocalEventClipRecorder(policy=policy, output_dir=clips_dir, recording_enabled=args.record_events)
     detector = SustainedEventDetector(policy=policy)
-    capture = run_demo_mode(args, recorder=recorder, detector=detector) if args.demo else run_camera_mode(args, recorder=recorder, detector=detector)
+    temporal_demo = None
+    if not args.demo and not args.no_temporal:
+        checkpoint = resolve_temporal_checkpoint(args.temporal_checkpoint)
+        if checkpoint is None:
+            message = (
+                "No temporal encoder checkpoint found. Skeleton/rule preview remains available, "
+                "but UNKNOWN repeat counting is disabled. Run scripts/train_v4_tcn.py or pass "
+                "--temporal-checkpoint."
+            )
+            if args.require_temporal:
+                raise FileNotFoundError(message)
+            print(f"temporal_warning: {message}")
+        else:
+            from ondamm_live_temporal_demo import LiveTemporalDemo
+
+            temporal_demo = LiveTemporalDemo(
+                child_id=dossier.child_id,
+                checkpoint_path=checkpoint,
+                pattern_memory_root=Path(args.pattern_memory_root),
+                clips_dir=clips_dir,
+                event_metadata_path=output_dir / "event_recording.json",
+                record_events=args.record_events,
+                clip_fps=args.clip_fps,
+                calibration_seconds=args.temporal_calibration_seconds,
+                onset_z=args.temporal_onset_z,
+                offset_z=args.temporal_offset_z,
+                min_episode_seconds=args.temporal_min_episode_seconds,
+                refractory_seconds=args.temporal_refractory_seconds,
+                min_occurrences_for_clip=args.temporal_min_occurrences,
+                strong_candidate_occurrences=args.temporal_strong_occurrences,
+                pre_seconds=args.temporal_pre_seconds,
+                post_seconds=args.temporal_post_seconds,
+            )
+            print(f"temporal_checkpoint: {checkpoint}")
+            print(f"pattern_memory: {Path(args.pattern_memory_root).expanduser().resolve() / dossier.child_id}")
+    capture = (
+        run_demo_mode(args, recorder=recorder, detector=detector)
+        if args.demo
+        else run_camera_mode(
+            args,
+            recorder=recorder,
+            detector=detector,
+            temporal_demo=temporal_demo,
+        )
+    )
 
     run_summary = build_learning_run_summary(
         plan,
@@ -524,7 +675,6 @@ def main() -> None:
         "json": output_dir / "learning_run_summary.json",
         "markdown": output_dir / "learning_run_summary.md",
     }
-    event_metadata_path = output_dir / "event_recording.json" if args.record_events else None
     manifest_path = output_dir / "manifest.json"
 
     ONDAMM_LEARNING_EXPORTS.mkdir(parents=True, exist_ok=True)
@@ -541,6 +691,19 @@ def main() -> None:
                 "mode": capture.mode,
                 "recording_enabled": True,
                 "policy": asdict(policy),
+                "temporal_policy": {
+                    "enabled": capture.temporal_enabled,
+                    "checkpoint": capture.temporal_checkpoint,
+                    "calibration_seconds": args.temporal_calibration_seconds,
+                    "episode_onset_z": args.temporal_onset_z,
+                    "episode_offset_z": args.temporal_offset_z,
+                    "min_episode_seconds": args.temporal_min_episode_seconds,
+                    "refractory_seconds": args.temporal_refractory_seconds,
+                    "min_occurrences_for_clip": args.temporal_min_occurrences,
+                    "clip_pre_seconds": args.temporal_pre_seconds,
+                    "clip_post_seconds": args.temporal_post_seconds,
+                    "saved_frame_style": "debug-overlay" if args.debug_overlay else "raw-camera",
+                },
                 "event_clip_directory": capture.clip_directory,
                 "detected_event_count": len(capture.detected_events),
                 "recorded_event_count": len(capture.recorded_events),

@@ -11,6 +11,8 @@ const state = {
   gptReview: null,
   eventReviews: null,
   clipBusy: null,
+  patternMemory: null,
+  patternBusy: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -120,6 +122,16 @@ async function loadEventReviews({ silent = false } = {}) {
   }
 }
 
+async function loadPatternMemory({ silent = false } = {}) {
+  state.patternMemory = null;
+  if (!state.current) return;
+  try {
+    state.patternMemory = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/patterns`);
+  } catch (error) {
+    if (!silent) toast(error.message, "error");
+  }
+}
+
 async function selectChild(childId) {
   state.current = await api(`/api/dossiers/${encodeURIComponent(childId)}`);
   localStorage.setItem("ondamm-selected-child", childId);
@@ -129,6 +141,7 @@ async function selectChild(childId) {
   state.gptReview = null;
   state.eventReviews = null;
   state.clipBusy = null;
+  state.patternBusy = null;
   if (!state.integrations) {
     state.integrations = await api("/api/integrations").catch(() => ({
       mediapipe: { configured: false }, openai: { configured: false, model: null },
@@ -136,6 +149,7 @@ async function selectChild(childId) {
   }
   await loadLocalClips({ preserveSelection: false, silent: true });
   await loadEventReviews({ silent: true });
+  await loadPatternMemory({ silent: true });
   renderChildList();
   renderCurrent();
   document.body.classList.remove("sidebar-open");
@@ -204,6 +218,7 @@ function renderCurrent() {
   $("#learning-plan").innerHTML = "";
   $("#sensing-result").innerHTML = `<div class="preview-placeholder"><span class="draft-stamp">DRAFT</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>`;
   renderClipReview();
+  renderPatternMemory();
   $("#export-result").innerHTML = "";
   setTab(state.tab);
 }
@@ -230,7 +245,60 @@ function renderPlans() {
 }
 
 function eventTypeName(value) {
-  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림", facial_movement_detected: "지정 미세 움직임" })[value] || value || "이벤트";
+  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림", facial_movement_detected: "지정 미세 움직임", temporal_movement_candidate: "새 반복 패턴 후보" })[value] || value || "이벤트";
+}
+
+function candidateClip(candidateId) {
+  return state.clips.find((clip) => clip.trigger_values?.candidate_id === candidateId) || null;
+}
+
+function renderPatternMemory() {
+  const workspace = $("#pattern-memory-workspace");
+  if (!workspace || !state.current) return;
+  if (state.current.canonical_status !== "active") {
+    workspace.innerHTML = `<article class="card pattern-memory-empty"><strong>동의 철회로 잠김</strong><p>패턴 조회·승격·suppression이 모두 차단되었습니다.</p></article>`;
+    return;
+  }
+  const memory = state.patternMemory;
+  if (!memory?.configured) {
+    workspace.innerHTML = `<article class="card pattern-memory-empty"><strong>Temporal runtime 대기</strong><p>아직 이 아동의 로컬 pattern memory가 없습니다. checkpoint를 연결한 runtime이 첫 독립 episode를 관찰하면 자동 생성됩니다.</p><code>outputs/ondamm/pattern-memory/${escapeHtml(state.current.child_id)}/</code></article>`;
+    return;
+  }
+  const known = memory.known_patterns || [];
+  const candidates = memory.candidates || [];
+  const knownMarkup = known.length ? known.map((pattern) => `
+    <article class="pattern-card known-pattern">
+      <div class="pattern-card-head"><span>KNOWN</span><strong>${escapeHtml(pattern.display_name)}</strong></div>
+      <p>${escapeHtml(pattern.pattern_id)} · 승인 근거 ${pattern.support_count}회</p>
+      <div class="pattern-stats"><span>후속 검출 <b>${pattern.occurrence_count}</b></span><span>거리 임계값 <b>${Number(pattern.distance_threshold).toFixed(3)}</b></span></div>
+      <small>prototype ${escapeHtml(pattern.prototype_digest.slice(0, 12))}… · ${escapeHtml(pattern.approved_by)}</small>
+    </article>`).join("") : `<div class="empty-inline">승인된 temporal pattern이 아직 없습니다.</div>`;
+  const candidateMarkup = candidates.length ? candidates.map((candidate) => {
+    const clip = candidateClip(candidate.candidate_id);
+    const selectedForReview = clip && state.selectedClipId === clip.clip_id;
+    const reviewStatus = selectedForReview ? state.eventReviews?.summary?.status : null;
+    let actionMarkup = `<button class="button button-quiet" data-pattern-watch="${escapeHtml(candidate.candidate_id)}" type="button">더 관찰</button>`;
+    if (clip) {
+      actionMarkup += `<button class="button button-secondary" data-pattern-clip="${escapeHtml(clip.clip_id)}" type="button">${selectedForReview ? "아래 검토 중" : "영상·검토 열기"}</button>`;
+    }
+    if (selectedForReview && reviewStatus === "consensus_accepted") {
+      actionMarkup += `<form class="pattern-promotion-form" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-clip-id="${escapeHtml(clip.clip_id)}"><input name="display_name" required maxlength="120" placeholder="새 패턴 표시 이름"><input name="approved_by" required maxlength="120" placeholder="별도 승인자"><button class="button button-primary" type="submit">Known pattern으로 등록</button></form>`;
+    } else if (selectedForReview && reviewStatus === "consensus_rejected") {
+      actionMarkup += `<form class="pattern-suppression-form" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-clip-id="${escapeHtml(clip.clip_id)}"><input name="approved_by" required maxlength="120" placeholder="승인자"><input name="reason" required maxlength="500" placeholder="suppression 사유"><button class="button button-danger" type="submit">Suppression memory에 등록</button></form>`;
+    } else if (clip) {
+      actionMarkup += `<p class="pattern-review-hint">3개 역할의 합의 후 별도 승격 또는 suppression을 실행할 수 있습니다.</p>`;
+    }
+    return `<article class="pattern-card candidate-pattern">
+      <div class="pattern-card-head"><span>${candidate.occurrence_count >= memory.policy.strong_candidate_occurrences ? "STRONG CANDIDATE" : "UNKNOWN"}</span><strong>${escapeHtml(candidate.candidate_id)}</strong></div>
+      <p>반복 ${candidate.occurrence_count} / ${memory.policy.min_occurrences_for_clip} · ${escapeHtml(candidate.review_state)}</p>
+      <div class="pattern-stats"><span>평균 길이 <b>${Number(candidate.mean_duration_seconds).toFixed(2)}초</b></span><span>품질 <b>${Math.round(Number(candidate.mean_quality_score) * 100)}%</b></span><span>개인화 threshold <b>${Number(candidate.recommended_distance_threshold ?? memory.policy.known_distance_threshold).toFixed(3)}</b></span></div>
+      <small>nearest known ${escapeHtml(candidate.nearest_known_pattern || "없음")} · distance ${Number(candidate.nearest_known_distance).toFixed(3)} · 영상 ${clip ? "1개" : "없음"}</small>
+      <div class="pattern-actions">${actionMarkup}</div>
+    </article>`;
+  }).join("") : `<div class="empty-inline">관찰 중인 unknown candidate가 없습니다.</div>`;
+  workspace.innerHTML = `
+    <div class="pattern-policy-strip card"><span>TCN <b>FROZEN</b></span><span>Prototype update <b>HUMAN ONLY</b></span><span>Clip threshold <b>${memory.policy.min_occurrences_for_clip} episodes</b></span><span>1~${memory.policy.min_occurrences_for_clip - 1}회 <b>NO MP4</b></span></div>
+    <div class="pattern-columns"><section><h4>새로운 반복 후보</h4><div class="pattern-grid">${candidateMarkup}</div></section><section><h4>승인된 Known pattern</h4><div class="pattern-grid">${knownMarkup}</div></section></div>`;
 }
 
 function expressionHintName(value) {
@@ -537,10 +605,75 @@ $("#learning-plan-button").addEventListener("click", async () => {
 $("#clip-refresh-button").addEventListener("click", async () => {
   await loadLocalClips({ preserveSelection: true });
   await loadEventReviews({ silent: true });
+  await loadPatternMemory({ silent: true });
   state.clipAnalysis = null;
   state.gptReview = null;
   renderClipReview();
+  renderPatternMemory();
   toast(`${state.clips.length}개의 로컬 이벤트 영상을 확인했습니다.`);
+});
+
+$("#pattern-refresh-button").addEventListener("click", async () => {
+  await loadLocalClips({ preserveSelection: true, silent: true });
+  await loadEventReviews({ silent: true });
+  await loadPatternMemory();
+  renderPatternMemory();
+  renderClipReview();
+  toast("개인별 temporal pattern memory를 새로고침했습니다.");
+});
+
+$("#pattern-memory-workspace").addEventListener("click", async (event) => {
+  const clipButton = event.target.closest("[data-pattern-clip]");
+  if (clipButton) {
+    state.selectedClipId = clipButton.dataset.patternClip;
+    state.clipAnalysis = null;
+    state.gptReview = null;
+    await loadEventReviews();
+    renderPatternMemory();
+    renderClipReview();
+    document.querySelector("#clip-review-title")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const watchButton = event.target.closest("[data-pattern-watch]");
+  if (watchButton) {
+    try {
+      await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/patterns/candidates/${encodeURIComponent(watchButton.dataset.patternWatch)}/watch`, { method: "POST", body: {} });
+      await loadPatternMemory();
+      renderPatternMemory();
+      toast("후보를 영상 추가 저장 없이 계속 관찰합니다.");
+    } catch (error) { toast(error.message, "error"); }
+  }
+});
+
+$("#pattern-memory-workspace").addEventListener("submit", async (event) => {
+  const promotion = event.target.closest(".pattern-promotion-form");
+  const suppression = event.target.closest(".pattern-suppression-form");
+  if (!promotion && !suppression) return;
+  event.preventDefault();
+  const form = promotion || suppression;
+  const data = new FormData(form);
+  const action = promotion ? "promote" : "suppress";
+  const body = promotion ? {
+    clip_id: form.dataset.clipId,
+    display_name: data.get("display_name").trim(),
+    approved_by: data.get("approved_by").trim(),
+  } : {
+    clip_id: form.dataset.clipId,
+    approved_by: data.get("approved_by").trim(),
+    reason: data.get("reason").trim(),
+  };
+  state.patternBusy = action;
+  try {
+    await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/patterns/candidates/${encodeURIComponent(form.dataset.candidateId)}/${action}`, { method: "POST", body });
+    state.current = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}`);
+    await loadPatternMemory();
+    renderPatternMemory();
+    toast(promotion ? "승인된 Known pattern을 등록했습니다. TCN은 재학습하지 않았습니다." : "거절 패턴을 suppression memory에 등록했습니다.");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.patternBusy = null;
+  }
 });
 
 $("#clip-review-workspace").addEventListener("click", async (event) => {
@@ -551,6 +684,7 @@ $("#clip-review-workspace").addEventListener("click", async (event) => {
     state.gptReview = null;
     await loadEventReviews({ silent: true });
     renderClipReview();
+    renderPatternMemory();
     return;
   }
   if (event.target.closest("#run-mediapipe-analysis")) {
@@ -603,6 +737,7 @@ $("#clip-review-workspace").addEventListener("submit", async (event) => {
         context_comment: data.get("context_comment").trim(),
       },
     });
+    renderPatternMemory();
     toast("독립 검토를 저장했습니다. 기록철에는 자동 반영되지 않았습니다.");
   } catch (error) {
     toast(error.message, "error");

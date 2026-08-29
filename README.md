@@ -4,8 +4,8 @@ Apple Silicon Mac에서 MediaPipe 기반 얼굴·시선·자세 신호를 실험
 
 현재 핵심은 다음 세 가지입니다.
 
-- 미세 움직임 연구: 통제 촬영, 프레임별 478 landmarks·52 blendshapes·head transform 추출, optical-flow·DINOv3 변화 시각화
-- ON DAMM MVP: dossier, 승인된 수업 기록, 학습 프로그램 초안, handoff, 철회 잠금, 검토형 얼굴 움직임 프로필
+- 미세 움직임 연구: 통제 촬영, 프레임별 478 landmarks·52 blendshapes·head transform 추출, causal TCN과 label-free temporal embedding 실험
+- ON DAMM MVP: dossier, 승인된 수업 기록, 학습 프로그램 초안, handoff, 철회 잠금, 개인별 temporal pattern memory와 검토형 승격
 - 오프라인 영상 분석: 사람 추적, 얼굴 신호·행동 proxy 지표, 자막 MP4와 JSON/CSV 생성
 
 > 이 프로젝트는 표정으로 감정, 집중도, ASD 여부, 순응도 또는 내적 상태를 진단하지 않습니다. 출력은 관찰 가능한 얼굴·시선·자세 변화의 보조 신호이며, 공식 기록이나 교육적 판단에는 사람의 검토와 승인이 필요합니다.
@@ -108,26 +108,48 @@ DINOv3 ViT-S/16은 gated 모델이어서 저장소에 포함하지 않습니다.
 
 ## 미세 움직임 학습 설계
 
-이 저장소는 현재 **수집·신호 추출·시각화까지 구현**되어 있고, 1D CNN/TCN temporal classifier는 아직 구현하지 않았습니다. 모델 입력의 권장 형태는 프레임별 절대값, neutral 대비 변화량, 1차 시간차를 함께 쓰는 것입니다.
+연구 경로에는 person-held-out causal TCN이, ON DAMM 제품 경로에는 frozen encoder를 이용한 개인별 temporal pattern memory가 구현되어 있습니다. 첫 제품 encoder는 DINO나 시선·머리 자세 같은 nuisance 신호를 섞지 않고 다음 79개 label-free feature만 받습니다.
 
 ```text
-b_t                 절대 blendshape
-b_t - b_neutral     개인별 neutral 대비 변화
-b_t - b_(t-1)       순간 변화
-15~30 frame window  약 0.25~0.5초 시계열(60 fps 기준)
+52 × bs_*           MediaPipe blendshape
+18 × geom_abs_*     canonical face geometry
+ 9 × motion_*       generic facial motion
+────────────────────────────────────────
+79 features × 60 frames(약 2초) → causal TCN → 64-D L2 embedding
 ```
 
-첫 모델은 특정 사람·특정 촬영 환경에 맞춘 이진 분류부터 시작하는 것이 안전합니다.
+`scripts/train_v4_tcn.py`는 각 held-out fold의 학습 완료 시 분류 head를 제외한 `tcn.*` 가중치, feature 순서, robust normalization 통계, split provenance를 제품용 checkpoint로 내보냅니다.
+
+```bash
+.venv/bin/python scripts/train_v4_tcn.py
+
+# 예: outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
+```
+
+checkpoint가 없거나 feature 순서·TCN shape이 맞지 않으면 runtime은 즉시 실패합니다. 학습되지 않은 random encoder로 조용히 fallback하지 않습니다. checkpoint 파일 자체는 실행 결과이므로 저장소에 포함하지 않습니다.
+
+TCN stride 5의 겹치는 window는 반복 횟수로 세지 않습니다. `MicroMotionEpisodeDetector`가 onset/offset hysteresis, 최소 지속시간, refractory를 적용해 독립 episode로 합친 뒤 `PatternMemoryStore`가 child별 known prototype과 unknown micro-cluster를 비교합니다.
 
 ```text
-neutral vs target_movement
-→ 작은 MLP / 1D CNN / TCN
-→ confidence가 낮으면 abstain
+KNOWN match             → KNOWN_OCCURRENCE
+UNKNOWN 1~2회           → metadata + embedding만 로컬 저장, MP4 없음
+동일 UNKNOWN 3회째       → 현재 episode만 pre 1.5초 + post 1.0초 MP4 저장
+사람 검토 accepted       → 별도 이름/승인으로 KNOWN pattern 승격
+사람 검토 rejected       → suppression memory 등록
+uncertain               → watch 상태로 계속 관찰
 ```
 
-특정 사람에게 overfitting하는 것은 이 연구 목적에서는 personalization으로 사용할 수 있습니다. 다만 같은 영상의 인접 프레임을 train/test에 무작위로 섞으면 성능이 과대평가되므로, 최소한 session 또는 source video 단위로 분리하고 별도의 재촬영 세션을 최종 확인용으로 남겨 두세요.
+초기 runtime은 `Frozen TCN + Dynamic Prototype Memory`만 사용합니다. online TCN 재학습은 꺼져 있으며, 승인된 후보 centroid만 known prototype으로 추가합니다. prototype vector는 `outputs/ondamm/pattern-memory/<child_id>/vectors.npz`에 남고 dossier audit에는 encoder/prototype digest와 source event ID만 기록합니다.
 
-MediaPipe 수치에서 목표 변화가 noise와 구분되지 않을 때는 얼굴 정렬에 MediaPipe를 유지한 채 눈·눈썹·입 ROI의 frame difference, optical flow 또는 DINO feature를 추가합니다.
+핵심 구현은 다음 모듈로 분리되어 있습니다.
+
+- `app/ondamm_temporal_encoder.py`: checkpoint 검증·export·64-D embedding
+- `app/ondamm_micro_motion.py`: 겹치는 TCN endpoint의 episode segmentation
+- `app/ondamm_pattern_memory.py`: known/unknown/suppression memory와 recurrence policy
+- `app/ondamm_micro_motion_runtime.py`: feature source → episode → memory → clip/UI orchestration
+- `app/ondamm_event_recording.py`: ephemeral RAM buffer와 disk persistence 분리, post-tail delayed finalize
+
+새 runtime은 카메라에 종속되지 않습니다. live MediaPipe adapter나 offline extractor가 checkpoint의 정확한 feature 순서로 frame feature와 원본 frame을 `MicroMotionRuntime.add_observation()`에 전달해야 합니다. 같은 영상의 인접 frame/window를 train/test에 무작위로 섞지 말고 session 또는 source video 단위로 분리하며, 별도의 재촬영 세션을 최종 확인용으로 남겨 두세요.
 
 ## ON DAMM 로컬 웹 MVP
 
@@ -144,6 +166,8 @@ open http://127.0.0.1:8765
 - 동의 철회 시 `withdrawn_locked` 전이
 - MediaPipe 관찰 보조와 local clip 검토
 - 지정 움직임·시선·자세 이벤트의 짧은 영상 자동 저장
+- 개인별 known pattern 지속 검출과 unknown 반복 후보 발견
+- 반복 3회째의 현재 episode만 저장하는 privacy-aware clip policy
 - 보호자·교사·기관 사회복지사의 역할별 독립 검토와 의견 일치·불일치 표시
 - 승인된 session ID를 근거로 한 개인별 얼굴 움직임 규칙
 
@@ -181,6 +205,83 @@ bash scripts/ondamm_learning.sh \
 각 검토는 `의미 있는 움직임 후보 / 이벤트 아님 / 추가 맥락 필요`, 영상에서 직접 확인한 사실, 상황 코멘트를 분리해 저장합니다. 세 역할의 최신 의견이 일치하는지 표시하지만, 합의가 생겨도 dossier나 수업 기록에는 자동 반영하지 않습니다. 별도의 사람 승인 단계가 필요합니다.
 
 현재 로컬 MVP에는 계정 인증과 기관별 권한 관리가 없으므로 검토자가 UI에서 역할과 이름을 직접 선택합니다. 실제 기관 배포 전에는 사용자 인증, 역할 기반 접근 제어, 전자서명과 보존기간 정책을 추가해야 합니다.
+
+### 제출·발표용 live demo capture
+
+`ondamm_learning_cli.py`의 카메라 모드는 `MicroExpressionSignalExtractor` 하나로 얼굴을 분석합니다. 별도 카메라 viewer를 동시에 실행하지 않고, 같은 frame에서 다음 작업을 한 프로세스로 처리합니다.
+
+```text
+camera frame
+  → 478 landmark + mouth/eyes/brow motion
+  → checkpoint 순서의 79-D temporal feature
+  → personal neutral motion calibration
+  → frozen causal TCN + episode recurrence
+  → debug overlay preview
+  → 3번째 독립 episode의 overlay MP4만 저장
+  → 기존 ON DAMM UI에서 재생·MediaPipe 분석·교차 검토
+```
+
+먼저 TCN 학습을 한 번 실행해 제품용 frozen encoder checkpoint를 만듭니다. 이미 `encoder_*.pt`가 있으면 생략합니다.
+
+```bash
+.venv/bin/python scripts/train_v4_tcn.py
+```
+
+터미널 1에서 UI를 실행합니다.
+
+```bash
+bash scripts/ondamm_web.sh
+open http://127.0.0.1:8765
+```
+
+UI에서 선택할 `demo-child` dossier가 존재하는지 확인한 뒤 터미널 2에서 live demo를 실행합니다.
+
+```bash
+bash scripts/ondamm_learning.sh \
+  --child-id demo-child \
+  --duration-seconds 60 \
+  --record-events \
+  --debug-overlay \
+  --require-temporal
+```
+
+checkpoint를 명시하려면 다음 옵션을 붙입니다.
+
+```bash
+--temporal-checkpoint outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
+```
+
+`--debug-overlay`는 preview뿐 아니라 새 temporal event MP4에도 skeleton, mouth/eyes/brow motion, candidate ID, `REPEAT n / 3`, `EVENT SAVED` 상태를 넣습니다. 앞의 1~2회 episode는 여전히 MP4를 쓰지 않습니다. 처음 3초는 개인 neutral motion calibration이므로 얼굴을 편하게 유지한 뒤 같은 짧은 움직임을 각각 중립 구간을 사이에 두고 세 번 수행합니다.
+
+checkpoint를 지정하지 않으면 가장 최근 `outputs/micro_expression/v4_tcn/encoder_*.pt`를 자동 선택합니다. `--require-temporal`은 checkpoint가 없을 때 skeleton만 보여 주며 계속 진행하는 대신 즉시 실패하게 하므로 제출 촬영에 권장합니다. DINO는 기본적으로 꺼져 있으며 꼭 필요할 때만 `--demo-dino`를 사용합니다.
+
+실제 headless 운용은 동일 명령에 `--headless`를 추가합니다. detector와 저장 정책은 그대로이고 OpenCV 창만 표시하지 않습니다.
+
+촬영 중 overlay 상태는 다음 순서로 바뀝니다.
+
+```text
+CALIBRATING NEUTRAL
+→ READY / OBSERVING
+→ UNKNOWN_OCCURRENCE · REPEAT 1 / 3
+→ UNKNOWN_OCCURRENCE · REPEAT 2 / 3
+→ REPEATING_CANDIDATE · REPEAT 3 / 3
+→ REPEATING PATTERN DETECTED · EVENT SAVED
+```
+
+마지막 메시지가 나온 뒤 UI의 **영상 목록 새로고침**을 누르면 overlay가 포함된 event clip이 나타납니다. 이후 영상 재생 → **MediaPipe로 분석** → 역할별 독립 검토 저장 → 검토 카드 반영 흐름을 그대로 촬영할 수 있습니다.
+
+### Temporal pattern memory 검토와 승격
+
+패턴 메모리가 생성된 아동을 선택하면 **관찰 보조 → 개인별 temporal pattern memory**에 known pattern과 unknown 반복 후보가 표시됩니다. 3회 미만 후보는 영상 없이 횟수·지속시간·품질·nearest-known 거리만 보여 줍니다. 3회째 저장된 event clip을 세 역할이 모두 `accepted`로 검토한 경우에만 별도 패턴 이름과 승인자를 입력해 known pattern으로 승격할 수 있습니다. 세 역할이 모두 `rejected`인 경우에만 suppression memory 등록이 가능합니다.
+
+```text
+GET  /api/dossiers/{child_id}/patterns
+POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/promote
+POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/suppress
+POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/watch
+```
+
+승격은 기존 event review와 별개의 명시적 행위입니다. 합의가 생겼다는 이유로 dossier나 TCN을 자동 변경하지 않습니다.
 
 ## 오프라인 영상 분석기
 

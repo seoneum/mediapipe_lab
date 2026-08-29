@@ -179,8 +179,13 @@ class FacialMovementAnalysis:
         }
 
 
-def _blendshape_scores(face_blendshapes: Iterable[Any] | None) -> dict[str, float]:
+def _blendshape_scores(face_blendshapes: Iterable[Any] | Mapping[str, float] | None) -> dict[str, float]:
     result: dict[str, float] = {}
+    if isinstance(face_blendshapes, Mapping):
+        for name, score in face_blendshapes.items():
+            if name in ALLOWED_BLENDSHAPE_NAMES and isinstance(score, (int, float)) and not isinstance(score, bool):
+                result[name] = max(0.0, min(1.0, float(score)))
+        return result
     for category in face_blendshapes or ():
         name = getattr(category, "category_name", None)
         score = getattr(category, "score", None)
@@ -226,7 +231,7 @@ def rules_from_approved_profiles(profiles: Iterable[Mapping[str, Any] | Any]) ->
 
 
 def analyze_facial_movements(
-    face_blendshapes: Iterable[Any] | None,
+    face_blendshapes: Iterable[Any] | Mapping[str, float] | None,
     *,
     rules: Sequence[MovementRule] = DEFAULT_MOVEMENT_RULES,
     top_limit: int = 10,
