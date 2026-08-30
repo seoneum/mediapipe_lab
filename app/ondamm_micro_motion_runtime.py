@@ -18,6 +18,7 @@ import numpy as np
 
 from ondamm_event_recording import EventMetadata, LocalEventClipRecorder
 from ondamm_micro_motion import MicroMotionEpisodeDetector, MotionEpisode, generic_motion_score
+from ondamm_movement_explanation import build_selection_explanation
 from ondamm_pattern_memory import PatternDecision, PatternMemoryStore
 from ondamm_temporal_encoder import TemporalEncoder
 
@@ -114,6 +115,11 @@ class MicroMotionRuntime:
             motion_score=score,
             embedding=embedding,
             quality_score=quality_score,
+            movement_features={
+                name: float(vector[index])
+                for index, name in enumerate(self.encoder.spec.feature_names)
+                if name.startswith("bs_") or name.startswith("motion_")
+            },
         )
         if episode is None:
             return RuntimeOutcome(None, None, None, tuple(event.to_dict() for event in finalized))
@@ -166,6 +172,7 @@ class MicroMotionRuntime:
             start_timestamp=episode.start_timestamp,
             end_timestamp=episode.end_timestamp,
             quality_score=episode.quality_score,
+            movement_summary=episode.movement_summary,
         )
         if (
             not decision.clip_required
@@ -174,6 +181,13 @@ class MicroMotionRuntime:
             or self.clip_recorder.has_pending_candidate(decision.candidate_id)
         ):
             return decision, None
+        selection_explanation, similarity_facts = build_selection_explanation(
+            occurrence_count=decision.occurrence_count,
+            occurrence_threshold=self.pattern_memory.policy.min_occurrences_for_clip,
+            embedding_distance=decision.distance,
+            movement_summary=decision.movement_summary,
+            regional_comparison=decision.regional_comparison,
+        )
         event = EventMetadata.create(
             event_type="repeating_micro_motion",
             start_timestamp=episode.start_timestamp,
@@ -190,8 +204,11 @@ class MicroMotionRuntime:
                 "nearest_known_distance": decision.nearest_known_distance,
                 "duration_seconds": episode.duration_seconds,
                 "quality_score": episode.quality_score,
+                "movement_summary": decision.movement_summary,
+                "similarity_to_previous": similarity_facts,
+                "selection_explanation": selection_explanation,
                 "encoder_digest": self.encoder.encoder_digest,
-                "raw_media_policy": "current threshold-crossing episode only",
+                "raw_media_policy": "bounded context around the threshold-crossing episode only",
             },
         )
         return decision, self.clip_recorder.record_event(event)

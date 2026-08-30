@@ -433,15 +433,39 @@ function renderClipReview() {
   const mediaPipe = state.integrations?.mediapipe || { configured: false };
   const llm = state.integrations?.llm || { configured: false };
   const localLlm = llm.provider === "ollama" && llm.local_only;
-  const triggerMarkup = Object.entries(selected.trigger_values || {}).map(([key, value]) => `
+  const structuredTriggerKeys = new Set(["movement_summary", "similarity_to_previous", "selection_explanation"]);
+  const triggerMarkup = Object.entries(selected.trigger_values || {}).filter(([key]) => !structuredTriggerKeys.has(key)).map(([key, value]) => `
     <span><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join("") || `<span><b>trigger</b>메타데이터 없음</span>`;
   const expressionEntries = Object.entries(state.clipAnalysis?.expression_label_counts || {});
+  const movementSummary = state.clipAnalysis?.movement_summary || selected.movement_summary;
+  const topMovementChanges = movementSummary?.top_changes || [];
+  const movementMarkup = movementSummary ? `
+    <div class="movement-summary-card">
+      <div><span>가장 크게 움직인 부위</span><strong>${escapeHtml(movementSummary.dominant_region_label || "확인 필요")}</strong></div>
+      <p>${escapeHtml(movementSummary.plain_summary || "부위별 상대 움직임을 확인했습니다.")}</p>
+      ${topMovementChanges.length ? `<ul>${topMovementChanges.slice(0, 3).map((item) => `<li><b>${escapeHtml(item.label)}</b><span>구간 변화 ${Number(item.change_points).toFixed(1)}%p</span></li>`).join("")}</ul>` : ""}
+      <small>${escapeHtml(movementSummary.non_diagnostic_notice || "상대 움직임 지표이며 감정이나 의도를 뜻하지 않습니다.")}</small>
+    </div>` : `<div class="analysis-placeholder">이전 영상에는 부위별 움직임 요약이 저장되지 않았습니다. 아래 MediaPipe 분석을 실행하면 현재 영상에서 확인할 수 있습니다.</div>`;
+  const similarity = selected.similarity_to_previous || {};
+  const selectionMarkup = selected.selection_explanation ? `
+    <section class="selection-reason-card ${selected.pattern_memory_status === "orphaned" ? "warning" : ""}">
+      <div class="selection-reason-head"><span>이벤트 선정 이유</span><strong>${Number(similarity.occurrence_count || selected.trigger_values?.occurrence_count || 0)}회 반복</strong></div>
+      <p>${escapeHtml(selected.selection_explanation)}</p>
+      <div class="selection-facts">
+        ${similarity.embedding_similarity_percent != null ? `<span><b>${Number(similarity.embedding_similarity_percent).toFixed(1)}%</b>시간 흐름 유사도</span>` : ""}
+        ${similarity.regional_comparison?.similarity_percent != null ? `<span><b>${Number(similarity.regional_comparison.similarity_percent).toFixed(1)}%</b>움직인 부위 비율 유사도</span>` : ""}
+        <span><b>${Number(selected.event_duration_seconds ?? selected.duration_seconds).toFixed(1)}초</b>실제 감지 구간</span>
+      </div>
+      ${selected.pattern_memory_notice ? `<small>${escapeHtml(selected.pattern_memory_notice)}</small>` : ""}
+    </section>` : "";
   const analysisMarkup = state.clipAnalysis ? `
     <div class="analysis-result">
+      <div class="analysis-quality ${state.clipAnalysis.review_data_quality === "usable" ? "usable" : "unusable"}">${escapeHtml(state.clipAnalysis.review_data_quality_notice || "로컬 분석 품질을 확인했습니다.")}</div>
       <div class="analysis-summary"><span>대표 움직임 힌트</span><strong>${escapeHtml(expressionHintName(state.clipAnalysis.dominant_expression_hint))}</strong></div>
       <div class="analysis-counts">${expressionEntries.length ? expressionEntries.map(([label, count]) => `<span>${escapeHtml(expressionHintName(label))}<b>${count}</b></span>`).join("") : `<span>분석한 프레임에서 얼굴 blendshape를 확인하지 못했습니다.</span>`}</div>
+      ${movementMarkup}
       <p>${escapeHtml(state.clipAnalysis.non_diagnostic_notice || "얼굴 미세 움직임 힌트이며 감정 상태로 확정하지 않습니다.")}</p>
-    </div>` : `<div class="analysis-placeholder">선택 영상을 이 Mac 안에서만 샘플링해 얼굴 blendshape 움직임을 확인합니다.</div>`;
+    </div>` : movementMarkup;
   const gptMarkup = state.gptReview ? `
     <div class="gpt-result"><div class="gpt-result-head"><strong>${state.gptReview.local_only ? "Ollama 로컬" : "GPT 원격"} 관찰 보조 초안</strong><span>${escapeHtml(state.gptReview.model || "LLM")}</span></div><div class="gpt-text">${escapeHtml(state.gptReview.review_text).replace(/\n/g, "<br>")}</div><p>전체 영상 전송 안 함 · 로컬 프레임 ${state.gptReview.local_frame_count || 0}장 · 원격 프레임 ${state.gptReview.remote_frame_count || 0}장 · 기록철 자동 반영 안 함</p></div>` : "";
 
@@ -458,12 +482,13 @@ function renderClipReview() {
           <button type="button" data-clip-id="${escapeHtml(clip.clip_id)}" class="clip-item ${clip.clip_id === selected.clip_id ? "selected" : ""}">
             <span class="clip-type">${escapeHtml(eventTypeName(clip.event_type))}</span>
             <strong>${escapeHtml(clip.event_id)}</strong>
-            <small>${clip.duration_seconds.toFixed(1)}초 · ${formatDate(clip.created_at, true)}</small>
+            <small>영상 ${Number(clip.clip_duration_seconds ?? clip.duration_seconds).toFixed(1)}초 · 움직임 ${Number(clip.event_duration_seconds ?? clip.duration_seconds).toFixed(1)}초<br>${formatDate(clip.created_at, true)}</small>
           </button>`).join("")}</div>
       </aside>
       <article class="card clip-player-panel">
         <div class="clip-panel-head"><div><span>로컬 재생</span><strong>${escapeHtml(eventTypeName(selected.event_type))}</strong></div><span class="local-only-pill">이 기기에서만</span></div>
         <video controls playsinline preload="metadata" src="${escapeHtml(selected.media_url)}" aria-label="선택한 로컬 특이 이벤트 영상"></video>
+        ${selectionMarkup}
         <div class="clip-trigger-grid">${triggerMarkup}</div>
         <p class="clip-path">${escapeHtml(selected.relative_path)}</p>
       </article>
@@ -549,6 +574,21 @@ async function refreshCurrent() {
   await loadDossiers(state.current.child_id);
 }
 
+async function reloadAfterSuccessfulMutation(preferredId = null, tab = null) {
+  try {
+    await loadDossiers(preferredId);
+    if (tab) setTab(tab);
+  } catch (error) {
+    console.error("Saved mutation could not be refreshed", error);
+    toast("변경 사항은 저장됐지만 화면 갱신에 실패했습니다. 페이지를 새로고침해 주세요.", "error");
+  }
+}
+
+async function refreshAfterSuccessfulMutation(tab = null) {
+  if (!state.current) return;
+  await reloadAfterSuccessfulMutation(state.current.child_id, tab);
+}
+
 $("#child-list").addEventListener("click", (event) => {
   const option = event.target.closest("[data-child-id]");
   if (option) selectChild(option.dataset.childId).catch((error) => toast(error.message, "error"));
@@ -570,7 +610,8 @@ $("#mobile-menu").addEventListener("click", () => document.body.classList.toggle
 
 $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const data = new FormData(form);
   const body = {
     child_id: data.get("child_id").trim(), display_name: data.get("display_name").trim(),
     age_band: data.get("age_band").trim(), communication_modality: data.get("communication_modality").trim(),
@@ -578,17 +619,22 @@ $("#create-form").addEventListener("submit", async (event) => {
     effective_strategies: splitList(data.get("effective_strategies")),
     triggers_and_calming_supports: splitList(data.get("triggers_and_calming_supports")),
   };
+  let created;
   try {
-    const created = await api("/api/dossiers", { method: "POST", body });
-    $("#create-dialog").close(); event.currentTarget.reset();
-    toast(`${created.display_name}님의 로컬 지원 기록철을 만들었습니다.`);
-    await loadDossiers(created.child_id);
-  } catch (error) { toast(error.message, "error"); }
+    created = await api("/api/dossiers", { method: "POST", body });
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#create-dialog").close(); form.reset();
+  toast(`${created.display_name}님의 로컬 지원 기록철을 만들었습니다.`);
+  await reloadAfterSuccessfulMutation(created.child_id);
 });
 
 $("#session-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const data = new FormData(form);
   const body = {
     title: data.get("title").trim(), activity_name: data.get("activity_name").trim(),
     observed_response: data.get("observed_response").trim(), educator_interpretation: data.get("educator_interpretation").trim(),
@@ -596,11 +642,14 @@ $("#session-form").addEventListener("submit", async (event) => {
   };
   try {
     await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/sessions`, { method: "POST", body });
-    $("#session-dialog").close(); event.currentTarget.reset();
-    event.currentTarget.elements.approved_by.value = "local-operator";
-    toast("승인된 수업 기록을 저장했습니다.");
-    await refreshCurrent(); setTab("sessions");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#session-dialog").close(); form.reset();
+  form.elements.approved_by.value = "local-operator";
+  toast("승인된 수업 기록을 저장했습니다.");
+  await refreshAfterSuccessfulMutation("sessions");
 });
 
 $("#new-facial-profile-button").addEventListener("click", () => {
@@ -610,7 +659,8 @@ $("#new-facial-profile-button").addEventListener("click", () => {
 
 $("#facial-profile-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const data = new FormData(form);
   const body = {
     label: data.get("label").trim(),
     display_name: data.get("display_name").trim(),
@@ -622,12 +672,15 @@ $("#facial-profile-form").addEventListener("submit", async (event) => {
   };
   try {
     await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/facial-movement-profiles/approve`, { method: "POST", body });
-    $("#facial-profile-dialog").close(); event.currentTarget.reset();
-    event.currentTarget.elements.activation_threshold.value = "0.35";
-    event.currentTarget.elements.approved_by.value = "local-operator";
-    toast("승인된 얼굴 움직임 프로필을 기록철에 저장했습니다.");
-    await refreshCurrent(); setTab("dossier");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#facial-profile-dialog").close(); form.reset();
+  form.elements.activation_threshold.value = "0.35";
+  form.elements.approved_by.value = "local-operator";
+  toast("승인된 얼굴 움직임 프로필을 기록철에 저장했습니다.");
+  await refreshAfterSuccessfulMutation("dossier");
 });
 
 $("#recommendation-form").addEventListener("submit", async (event) => {
@@ -650,14 +703,18 @@ $("#recommendation-preview").addEventListener("click", async (event) => {
     await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/recommendations/approve`, {
       method: "POST", body: { ...state.recommendationPayload, approved_by: approvedBy },
     });
-    toast("검토한 활동 계획을 승인 기록으로 저장했습니다.");
-    await refreshCurrent(); setTab("plan");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  toast("검토한 활동 계획을 승인 기록으로 저장했습니다.");
+  await refreshAfterSuccessfulMutation("plan");
 });
 
 $("#local-rag-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const formData = new FormData(form);
   const question = formData.get("question").trim();
   const scope = formData.get("scope");
   if (!question) return toast("검색하거나 물어볼 내용을 입력해 주세요.", "error");
@@ -681,7 +738,7 @@ $("#local-rag-form").addEventListener("submit", async (event) => {
       { role: "assistant", content: state.ragResult.answer },
     );
     state.ragHistory = state.ragHistory.slice(-8);
-    event.currentTarget.elements.question.value = "";
+    form.elements.question.value = "";
     toast(`로컬 자료에서 답변과 영상 ${state.ragResult.video_results?.length || 0}개를 찾았습니다.`);
   } catch (error) {
     toast(error.message, "error");
@@ -769,10 +826,13 @@ $("#pattern-memory-workspace").addEventListener("click", async (event) => {
   if (watchButton) {
     try {
       await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/patterns/candidates/${encodeURIComponent(watchButton.dataset.patternWatch)}/watch`, { method: "POST", body: {} });
-      await loadPatternMemory();
-      renderPatternMemory();
-      toast("후보를 영상 추가 저장 없이 계속 관찰합니다.");
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) {
+      toast(error.message, "error");
+      return;
+    }
+    toast("후보를 영상 추가 저장 없이 계속 관찰합니다.");
+    await refreshAfterSuccessfulMutation("observation");
+    renderPatternMemory();
   }
 });
 
@@ -796,15 +856,15 @@ $("#pattern-memory-workspace").addEventListener("submit", async (event) => {
   state.patternBusy = action;
   try {
     await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/patterns/candidates/${encodeURIComponent(form.dataset.candidateId)}/${action}`, { method: "POST", body });
-    state.current = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}`);
-    await loadPatternMemory();
-    renderPatternMemory();
-    toast(promotion ? "승인된 Known pattern을 등록했습니다. TCN은 재학습하지 않았습니다." : "거절 패턴을 suppression memory에 등록했습니다.");
   } catch (error) {
     toast(error.message, "error");
-  } finally {
     state.patternBusy = null;
+    return;
   }
+  toast(promotion ? "승인된 Known pattern을 등록했습니다. TCN은 재학습하지 않았습니다." : "거절 패턴을 suppression memory에 등록했습니다.");
+  await refreshAfterSuccessfulMutation("observation");
+  state.patternBusy = null;
+  renderPatternMemory();
 });
 
 $("#clip-review-workspace").addEventListener("click", async (event) => {
@@ -899,12 +959,16 @@ $("#sensing-form").addEventListener("submit", async (event) => {
 $("#export-button").addEventListener("click", async () => {
   const actorId = $("#export-actor").value.trim();
   if (!actorId) return toast("담당자를 입력해 주세요.", "error");
+  let result;
   try {
-    const result = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/handoff/export`, { method: "POST", body: { actor_id: actorId } });
-    $("#export-result").innerHTML = `<div class="export-success"><strong>생성 완료 · ${escapeHtml(result.manifest.artifact_id)}</strong>문서: ${escapeHtml(result.export_path)}<br>서명: ${escapeHtml(result.manifest_path)}</div>`;
-    toast("서명된 인수인계 자료를 만들었습니다.");
-    await refreshCurrent(); setTab("handoff");
-  } catch (error) { toast(error.message, "error"); }
+    result = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/handoff/export`, { method: "POST", body: { actor_id: actorId } });
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#export-result").innerHTML = `<div class="export-success"><strong>생성 완료 · ${escapeHtml(result.manifest.artifact_id)}</strong>문서: ${escapeHtml(result.export_path)}<br>서명: ${escapeHtml(result.manifest_path)}</div>`;
+  toast("서명된 인수인계 자료를 만들었습니다.");
+  await refreshAfterSuccessfulMutation("handoff");
 });
 
 $("#manage-status-button").addEventListener("click", () => {
@@ -931,10 +995,13 @@ $("#status-form").addEventListener("submit", async (event) => {
     await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/status`, {
       method: "POST", body: Object.fromEntries(data.entries()),
     });
-    $("#status-dialog").close();
-    toast(data.get("status") === "active" ? "기록철을 활성화했습니다. 촬영 전 새 동의와 권리 확인이 필요합니다." : "동의를 철회하고 모든 촬영·분석을 잠갔습니다.");
-    await refreshCurrent();
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#status-dialog").close();
+  toast(data.get("status") === "active" ? "기록철을 활성화했습니다. 촬영 전 새 동의와 권리 확인이 필요합니다." : "동의를 철회하고 모든 촬영·분석을 잠갔습니다.");
+  await refreshAfterSuccessfulMutation();
 });
 
 $("#purge-preview-button").addEventListener("click", async () => {
@@ -953,23 +1020,20 @@ $("#purge-preview-button").addEventListener("click", async () => {
 $("#purge-preview").addEventListener("click", async (event) => {
   if (!event.target.closest("#purge-execute-button") || !state.current) return;
   const childId = state.current.child_id;
+  let result;
   try {
-    const result = await api(`/api/dossiers/${encodeURIComponent(childId)}/purge/execute`, {
+    result = await api(`/api/dossiers/${encodeURIComponent(childId)}/purge/execute`, {
       method: "POST", body: { actor_id: $("#purge-actor").value.trim(), confirmation: $("#purge-confirmation").value },
     });
-    $("#status-dialog").close();
-    state.current = null;
-    toast(`${result.message} 익명화된 삭제 확인서를 남겼습니다.`);
-    await loadDossiers();
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  $("#status-dialog").close();
+  state.current = null;
+  toast(`${result.message} 익명화된 삭제 확인서를 남겼습니다.`);
+  await reloadAfterSuccessfulMutation();
 });
-
-async function reloadRights() {
-  if (!state.current) return;
-  state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights`);
-  state.current = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}`);
-  renderRights();
-}
 
 $("#child-stop-button").addEventListener("click", async () => {
   if (!state.current) return;
@@ -986,14 +1050,15 @@ $("#child-stop-button").addEventListener("click", async () => {
 $("#camera-consent-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.current) return;
-  const data = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const data = new FormData(form);
   const body = Object.fromEntries(data.entries());
   body.guardian_consent_confirmed = data.get("guardian_consent_confirmed") === "on";
   body.subject_assent_confirmed = data.get("subject_assent_confirmed") === "on";
   try {
     state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights/consents`, { method: "POST", body });
-    event.currentTarget.reset();
-    event.currentTarget.elements.form_version.value = "1.0";
+    form.reset();
+    form.elements.form_version.value = "1.0";
     renderRights();
     toast("선택한 목적의 서명 동의를 이 기기에 등록했습니다.");
   } catch (error) { toast(error.message, "error"); }
@@ -1038,10 +1103,13 @@ $("#pre-session-form").addEventListener("submit", async (event) => {
   });
   try {
     state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights/pre-session`, { method: "POST", body });
-    await reloadRights();
-    renderCurrent();
-    toast("교육 전 권리 확인을 마쳤습니다. 유효시간 동안만 촬영을 시작할 수 있습니다.");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  renderRights();
+  toast("교육 전 권리 확인을 마쳤습니다. 유효시간 동안만 촬영을 시작할 수 있습니다.");
+  await refreshAfterSuccessfulMutation("observation");
 });
 
 loadDossiers().catch((error) => {

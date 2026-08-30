@@ -14,10 +14,12 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 import numpy as np
+
+from ondamm_movement_explanation import compare_region_profiles
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
@@ -94,6 +96,8 @@ class PatternDecision:
     strong_candidate: bool
     nearest_known_pattern: str | None = None
     nearest_known_distance: float | None = None
+    movement_summary: dict[str, Any] | None = None
+    regional_comparison: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +112,8 @@ class PatternDecision:
             "strong_candidate": self.strong_candidate,
             "nearest_known_pattern": self.nearest_known_pattern,
             "nearest_known_distance": self.nearest_known_distance,
+            "movement_summary": self.movement_summary,
+            "regional_comparison": self.regional_comparison,
         }
 
 
@@ -171,6 +177,7 @@ class PatternMemoryStore:
         start_timestamp: float,
         end_timestamp: float,
         quality_score: float,
+        movement_summary: Mapping[str, Any] | None = None,
     ) -> PatternDecision:
         episode_id = _safe_id(episode_id, "episode_id")
         vector = _vector(embedding, dimension=self.embedding_dimension)
@@ -187,8 +194,13 @@ class PatternMemoryStore:
             known = self._nearest(metadata["known_patterns"], vectors, vector)
             if known and known[1] <= float(known[0].get("distance_threshold", self.policy.known_distance_threshold)):
                 item, distance = known
+                regional_comparison = compare_region_profiles(
+                    movement_summary,
+                    item.get("movement_profile"),
+                )
                 item["occurrence_count"] = int(item.get("occurrence_count", 0)) + 1
                 item["last_seen"] = utc_now()
+                self._update_movement_profile(item, movement_summary)
                 decision = PatternDecision(
                     lifecycle="KNOWN_OCCURRENCE",
                     episode_id=episode_id,
@@ -201,6 +213,8 @@ class PatternMemoryStore:
                     strong_candidate=False,
                     nearest_known_pattern=item["pattern_id"],
                     nearest_known_distance=round(distance, 6),
+                    movement_summary=dict(movement_summary) if movement_summary else None,
+                    regional_comparison=regional_comparison,
                 )
                 return self._remember_decision(metadata, vectors, decision)
 
@@ -229,6 +243,10 @@ class PatternMemoryStore:
             if candidate and candidate[1] <= self.policy.candidate_distance_threshold:
                 item, candidate_distance = candidate
                 count = int(item["occurrence_count"])
+                regional_comparison = compare_region_profiles(
+                    movement_summary,
+                    item.get("movement_profile"),
+                )
                 old_centroid = vectors[item["vector_key"]]
                 # Preserve the resultant length so repeated normalization does
                 # not turn the update into an unweighted blend of the previous
@@ -261,6 +279,7 @@ class PatternMemoryStore:
                     8,
                 )
                 item["recommended_distance_threshold"] = self._recommended_threshold(item)
+                self._update_movement_profile(item, movement_summary)
                 candidate_id = item["candidate_id"]
             else:
                 if len(metadata["candidates"]) >= self.policy.max_candidates:
@@ -269,6 +288,7 @@ class PatternMemoryStore:
                 vector_key = f"candidate__{candidate_id}"
                 vectors[vector_key] = vector
                 candidate_distance = None
+                regional_comparison = None
                 item = {
                     "candidate_id": candidate_id,
                     "vector_key": vector_key,
@@ -290,6 +310,8 @@ class PatternMemoryStore:
                         min(0.05, self.policy.known_distance_threshold),
                         6,
                     ),
+                    "movement_profile": self._movement_distribution(movement_summary),
+                    "movement_profile_count": 1 if self._movement_distribution(movement_summary) else 0,
                 }
                 metadata["candidates"].append(item)
 
@@ -311,6 +333,8 @@ class PatternMemoryStore:
                 strong_candidate=count >= self.policy.strong_candidate_occurrences,
                 nearest_known_pattern=known[0]["pattern_id"] if known else None,
                 nearest_known_distance=round(float(nearest_known_distance), 6),
+                movement_summary=dict(movement_summary) if movement_summary else None,
+                regional_comparison=regional_comparison,
             )
             return self._remember_decision(metadata, vectors, decision)
 
@@ -404,6 +428,8 @@ class PatternMemoryStore:
                 "approved_by": approved_by,
                 "created_at": utc_now(),
                 "last_seen": None,
+                "movement_profile": candidate.get("movement_profile"),
+                "movement_profile_count": int(candidate.get("movement_profile_count", 0)),
             }
             metadata["known_patterns"].append(record)
             self._remove_candidate(metadata, vectors, candidate)
@@ -530,6 +556,52 @@ class PatternMemoryStore:
         # child.  The small floor supports near-identical approved exemplars.
         learned = mean + 2.0 * math.sqrt(variance) + 0.02
         return round(float(np.clip(learned, 0.05, self.policy.known_distance_threshold)), 6)
+
+    @staticmethod
+    def _movement_distribution(movement_summary: Mapping[str, Any] | None) -> dict[str, float] | None:
+        if not movement_summary:
+            return None
+        raw = movement_summary.get("region_distribution")
+        if not isinstance(raw, Mapping):
+            return None
+        distribution: dict[str, float] = {}
+        for key, value in raw.items():
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number >= 0:
+                distribution[str(key)] = number
+        total = sum(distribution.values())
+        if total <= 1e-12:
+            return None
+        return {key: round(value / total, 6) for key, value in distribution.items()}
+
+    @classmethod
+    def _update_movement_profile(
+        cls,
+        item: dict[str, Any],
+        movement_summary: Mapping[str, Any] | None,
+    ) -> None:
+        current = cls._movement_distribution(movement_summary)
+        if not current:
+            return
+        previous = item.get("movement_profile")
+        count = int(item.get("movement_profile_count", 0))
+        if not isinstance(previous, Mapping) or count <= 0:
+            item["movement_profile"] = current
+            item["movement_profile_count"] = 1
+            return
+        keys = set(previous) | set(current)
+        updated = {
+            key: (float(previous.get(key, 0.0)) * count + float(current.get(key, 0.0))) / (count + 1)
+            for key in keys
+        }
+        total = sum(updated.values())
+        item["movement_profile"] = {
+            key: round(value / total, 6) for key, value in updated.items()
+        }
+        item["movement_profile_count"] = count + 1
 
     @staticmethod
     def _candidate(metadata: dict[str, Any], candidate_id: str) -> dict[str, Any]:

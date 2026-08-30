@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from ondamm_movement_explanation import build_selection_explanation, summarize_blendshape_samples
+
 
 REVIEWER_ROLES = ("guardian", "teacher", "institutional_social_worker")
 REVIEW_DECISIONS = ("accepted", "rejected", "uncertain")
@@ -180,12 +182,28 @@ class LocalClip:
     mode: str
     relative_path: str
     path: Path
+    media_duration_seconds: float | None
 
     @property
     def duration_seconds(self) -> float:
         return round(max(0.0, self.end_timestamp - self.start_timestamp), 3)
 
     def to_public_dict(self) -> dict[str, Any]:
+        trigger_values = dict(self.trigger_values)
+        selection_explanation = trigger_values.get("selection_explanation")
+        similarity_facts = trigger_values.get("similarity_to_previous")
+        if self.event_type == "repeating_micro_motion" and not selection_explanation:
+            selection_explanation, similarity_facts = build_selection_explanation(
+                occurrence_count=int(trigger_values.get("occurrence_count", 0) or 0),
+                occurrence_threshold=int(trigger_values.get("occurrence_threshold", 3) or 3),
+                embedding_distance=trigger_values.get("candidate_distance"),
+                movement_summary=trigger_values.get("movement_summary"),
+                regional_comparison=(
+                    similarity_facts.get("regional_comparison")
+                    if isinstance(similarity_facts, dict)
+                    else None
+                ),
+            )
         return {
             "clip_id": self.clip_id,
             "child_id": self.child_id,
@@ -194,7 +212,16 @@ class LocalClip:
             "start_timestamp": self.start_timestamp,
             "end_timestamp": self.end_timestamp,
             "duration_seconds": self.duration_seconds,
-            "trigger_values": self.trigger_values,
+            "event_duration_seconds": self.duration_seconds,
+            "clip_duration_seconds": (
+                self.media_duration_seconds
+                if self.media_duration_seconds is not None
+                else float(trigger_values.get("clip_duration_seconds", self.duration_seconds))
+            ),
+            "selection_explanation": selection_explanation,
+            "similarity_to_previous": similarity_facts,
+            "movement_summary": trigger_values.get("movement_summary"),
+            "trigger_values": trigger_values,
             "created_at": self.created_at,
             "mode": self.mode,
             "relative_path": self.relative_path,
@@ -280,7 +307,38 @@ class LocalClipCatalog:
             mode=mode,
             relative_path=relative_path,
             path=candidate,
+            media_duration_seconds=probe_video_duration(candidate),
         )
+
+
+def probe_video_duration(path: Path) -> float | None:
+    """Read container duration for UI labels; malformed test/demo files fail soft."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    completed = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        duration = float(completed.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return round(duration, 3) if duration > 0 else None
 
 
 _TRANSCODE_LOCK = threading.Lock()
@@ -417,11 +475,20 @@ def analyze_video_frames(
             else:
                 unavailable += 1
         sampled = len(indices)
+        analyzed = sum(counts.values())
+        coverage = analyzed / sampled if sampled else 0.0
         dominant = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0] if counts else None
         return {
             "sampled_frame_count": sampled,
-            "analyzed_frame_count": sum(counts.values()),
+            "analyzed_frame_count": analyzed,
             "unavailable_frame_count": unavailable,
+            "face_analysis_coverage": round(coverage, 3),
+            "review_data_quality": "usable" if analyzed >= 3 and coverage >= 0.6 else "unusable",
+            "review_data_quality_notice": (
+                "얼굴 blendshape가 충분한 프레임에서 확인됐습니다."
+                if analyzed >= 3 and coverage >= 0.6
+                else "얼굴 blendshape를 충분히 읽지 못해 이 영상은 움직임 학습·승인 근거로 사용하지 마세요."
+            ),
             "video_frame_count": total_frames,
             "fps": round(fps, 3),
             "expression_label_counts": dict(sorted(counts.items())),
@@ -441,6 +508,7 @@ class MediaPipeExpressionAnalyzer:
     def __init__(self) -> None:
         self._detector = None
         self._mp = None
+        self._blendshape_samples: list[dict[str, float]] = []
 
     def __enter__(self) -> "MediaPipeExpressionAnalyzer":
         import mediapipe as mp
@@ -475,8 +543,18 @@ class MediaPipeExpressionAnalyzer:
         result = self._detector.detect(image)
         if not result.face_blendshapes:
             return None
+        self._blendshape_samples.append(
+            {
+                str(category.category_name): float(category.score)
+                for category in result.face_blendshapes
+                if category.category_name
+            }
+        )
         label, _ = estimate_expression(result.face_blendshapes, 3)
         return label
+
+    def movement_summary(self) -> dict[str, Any]:
+        return summarize_blendshape_samples(self._blendshape_samples)
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
         if self._detector is not None:
@@ -494,5 +572,11 @@ def analyze_clip_with_mediapipe(
 ) -> dict[str, Any]:
     with analyzer_factory() as analyzer:
         result = analyze_video_frames(path, analyze_frame=analyzer.analyze, max_samples=max_samples)
+        movement_summary = (
+            analyzer.movement_summary()
+            if callable(getattr(analyzer, "movement_summary", None))
+            else {}
+        )
     result["analysis_engine"] = "google_mediapipe_holistic_blendshapes"
+    result["movement_summary"] = movement_summary
     return result

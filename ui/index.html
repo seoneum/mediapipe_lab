@@ -212,7 +212,7 @@
 
           <section class="pattern-memory-section" aria-labelledby="pattern-memory-title">
             <div class="section-subheading pattern-memory-heading">
-              <div><p class="eyebrow">개인별 시간 흐름 패턴</p><h3 id="pattern-memory-title">개인별 반복 패턴 메모리</h3><p>1~2회는 수치 정보만 축적하고, 반복 기준을 넘은 현재 구간만 짧은 영상으로 검토합니다. 시간 흐름 인코더는 고정하고 사람이 승인한 기준 패턴만 추가합니다.</p></div>
+              <div><p class="eyebrow">개인별 시간 흐름 패턴</p><h3 id="pattern-memory-title">개인별 반복 패턴 메모리</h3><p>1~2회는 수치 정보만 축적하고, 반복 기준을 넘은 현재 구간은 앞뒤 문맥을 포함한 제한 영상으로 검토합니다. 시간 흐름 인코더는 고정하고 사람이 승인한 기준 패턴만 추가합니다.</p></div>
               <button class="button button-quiet" id="pattern-refresh-button" type="button">패턴 새로고침</button>
             </div>
             <div id="pattern-memory-workspace" class="pattern-memory-workspace">
@@ -222,7 +222,7 @@
 
           <section class="clip-review-section" aria-labelledby="clip-review-title">
             <div class="section-subheading clip-review-heading">
-              <div><p class="eyebrow">이 기기에서 움직임 검토</p><h3 id="clip-review-title">미세 움직임 이벤트 검토</h3><p>자동 저장된 짧은 이벤트 영상을 재생하고, 로컬 분석과 보호자·교사·기관 사회복지사의 교차 검토를 진행합니다.</p></div>
+              <div><p class="eyebrow">이 기기에서 움직임 검토</p><h3 id="clip-review-title">미세 움직임 이벤트 검토</h3><p>자동 저장된 앞뒤 문맥 포함 이벤트 영상을 재생하고, 움직인 부위·이전 발생 유사성·선정 이유를 확인한 뒤 교차 검토합니다.</p></div>
               <button class="button button-quiet" id="clip-refresh-button" type="button">영상 목록 새로고침</button>
             </div>
             <div id="clip-review-workspace" class="clip-review-workspace">
@@ -246,7 +246,7 @@
 
   <dialog id="create-dialog" class="dialog">
     <form method="dialog" id="create-form">
-      <div class="dialog-head"><div><p class="eyebrow">새 로컬 지원 기록철</p><h2>지원 기록철 만들기</h2></div><button class="icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="dialog-head"><div><p class="eyebrow">새 로컬 지원 기록철</p><h2>지원 기록철 만들기</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
       <p class="dialog-intro">처음에는 핵심 정보만 넣고, 확인된 내용부터 천천히 쌓아 가세요.</p>
       <div class="form-grid">
         <label>로컬 ID<input name="child_id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" placeholder="child-haneul"><small>영문, 숫자, -, _만 사용</small></label>
@@ -263,7 +263,7 @@
 
   <dialog id="session-dialog" class="dialog">
     <form method="dialog" id="session-form">
-      <div class="dialog-head"><div><p class="eyebrow">승인된 수업 요약</p><h2>수업 기록 남기기</h2></div><button class="icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="dialog-head"><div><p class="eyebrow">승인된 수업 요약</p><h2>수업 기록 남기기</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
       <div class="separation-note"><div><strong>관찰</strong><span>카드를 3회 선택함</span></div><i>≠</i><div><strong>해석</strong><span>시각 단서가 도움이 된 것으로 보임</span></div></div>
       <div class="form-grid"><label>기록 제목<input name="title" required placeholder="동물 분류 활동 1회차"></label><label>활동명<input name="activity_name" required placeholder="동물 분류"></label></div>
       <label>관찰한 반응<textarea name="observed_response" required placeholder="판단 없이 실제로 관찰한 행동을 적습니다."></textarea></label>
@@ -275,7 +275,7 @@
 
   <dialog id="status-dialog" class="dialog compact-dialog">
     <form method="dialog" id="status-form">
-      <div class="dialog-head"><div><p class="eyebrow">동의와 기록 상태</p><h2>동의·상태 관리</h2></div><button class="icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="dialog-head"><div><p class="eyebrow">동의와 기록 상태</p><h2>동의·상태 관리</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
       <div id="status-dialog-copy"></div>
       <input type="hidden" name="status">
       <label>처리자<input name="actor_id" required value="guardian-admin"></label>
@@ -293,7 +293,7 @@
 
   <dialog id="facial-profile-dialog" class="dialog">
     <form method="dialog" id="facial-profile-form">
-      <div class="dialog-head"><div><p class="eyebrow">APPROVED MOVEMENT PROFILE</p><h2>얼굴 움직임 프로필 승인</h2></div><button class="icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="dialog-head"><div><p class="eyebrow">APPROVED MOVEMENT PROFILE</p><h2>얼굴 움직임 프로필 승인</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
       <p class="dialog-intro">먼저 수업 기록에서 반복 관찰을 승인한 다음 해당 session ID를 근거로 연결하세요. 감정이나 진단을 학습하지 않고 관찰 가능한 blendshape 규칙만 조정합니다.</p>
       <div class="form-grid"><label>규칙 ID<input name="label" required pattern="[A-Za-z0-9_-]+" placeholder="lip_corner_pull"></label><label>표시 이름<input name="display_name" required placeholder="입꼬리 당김 움직임"></label></div>
       <label>MediaPipe blendshape 이름<textarea name="blendshape_names" required placeholder="mouthDimpleLeft, mouthDimpleRight"></textarea></label>

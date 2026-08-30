@@ -163,6 +163,8 @@ class OndammLocalClipTests(unittest.TestCase):
         self.assertEqual(result["sampled_frame_count"], 5)
         self.assertEqual(sum(result["expression_label_counts"].values()), 5)
         self.assertIn(result["dominant_expression_hint"], {"neutral", "smile"})
+        self.assertEqual(result["review_data_quality"], "usable")
+        self.assertEqual(result["face_analysis_coverage"], 1.0)
         self.assertIn("감정 상태", result["non_diagnostic_notice"])
 
     def test_mediapipe_clip_analysis_uses_injected_face_analyzer(self) -> None:

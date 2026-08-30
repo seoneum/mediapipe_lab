@@ -255,9 +255,12 @@ class OndammDemoCaptureTests(unittest.TestCase):
             )
             frame = np.zeros((48, 64, 3), dtype=np.uint8)
             schedule = []
-            for index in range(126):
+            # Calibration completes near 6 s, then the runtime deliberately
+            # requires a fresh 60-frame causal history before detection.
+            action_starts = (12.0, 15.0, 18.0)
+            for index in range(231):
                 timestamp = round(index * 0.1, 3)
-                moving = any(start <= timestamp <= start + 1.0 for start in (6.0, 8.0, 10.0))
+                moving = any(start <= timestamp <= start + 1.0 for start in action_starts)
                 schedule.append((timestamp, 0.02 if moving else 0.0))
             requested = []
             finalized = []
@@ -279,7 +282,7 @@ class OndammDemoCaptureTests(unittest.TestCase):
             metadata = json.loads((root / "event_recording.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["recorded_event_count"], 1)
             self.assertEqual(metadata["events"][0]["event_type"], "repeating_micro_motion")
-            state = demo.overlay_status(timestamp=12.5)
+            state = demo.overlay_status(timestamp=23.0)
             self.assertTrue(state["event_saved"])
             self.assertEqual(state["occurrence_count"], 3)
             with demo.detection_log_path.open("r", encoding="utf-8", newline="") as handle:

@@ -61,8 +61,8 @@ class LiveTemporalDemo:
         min_occurrences_for_clip: int = 3,
         strong_candidate_occurrences: int = 5,
         candidate_distance_threshold: float = 0.05,
-        pre_seconds: float = 1.5,
-        post_seconds: float = 1.0,
+        pre_seconds: float = 3.0,
+        post_seconds: float = 3.0,
         review_frame_size: tuple[int, int] = (960, 540),
         review_buffer_fps: float = 12.0,
     ) -> None:
@@ -129,6 +129,7 @@ class LiveTemporalDemo:
                 offset_threshold=offset_z,
                 min_duration_seconds=min_episode_seconds,
                 refractory_seconds=refractory_seconds,
+                offset_hold_seconds=0.8,
             )
         )
         self.runtime = MicroMotionRuntime(
@@ -154,49 +155,121 @@ class LiveTemporalDemo:
         frame_for_record: np.ndarray,
     ) -> LiveTemporalResult:
         face_detected = bool(signal.get("face_detected"))
-        raw_motion = raw_motion_magnitude(signal) if face_detected else 0.0
+
+        raw_motion = (
+            raw_motion_magnitude(signal)
+            if face_detected
+            else 0.0
+        )
+
+        # calibration 이전 상태를 기억한다.
+        calibration_was_ready = self.motion_calibrator.ready
+
         self._motion_score = self.motion_calibrator.add(
             timestamp=timestamp,
             raw_motion=raw_motion,
             face_detected=face_detected,
         )
-        if not face_detected:
-            if self._face_missing_since is None:
-                self._face_missing_since = float(timestamp)
-            if (
-                not self._face_loss_reset
-                and float(timestamp) - self._face_missing_since + 1e-9 >= self.face_loss_reset_seconds
-            ):
-                self.runtime.reset_temporal_history()
-                self._face_loss_reset = True
-            outcome = self.runtime.add_frame_only(timestamp=timestamp, frame=frame_for_record)
-        else:
-            if self._face_missing_since is not None:
+
+        calibration_ready = self.motion_calibrator.ready
+
+        # ---------------------------------------------------------
+        # Calibration이 끝나기 전에는 TCN feature history를
+        # 절대 쌓지 않는다.
+        #
+        # frame은 review ring/post-tail 용도로만 전달한다.
+        # ---------------------------------------------------------
+        if not calibration_ready:
+            if not face_detected:
+                if self._face_missing_since is None:
+                    self._face_missing_since = float(timestamp)
+            else:
                 self._face_missing_since = None
-            features = self.feature_adapter.from_signal(signal)
-            outcome = self.runtime.add_observation(
+
+            outcome = self.runtime.add_frame_only(
                 timestamp=timestamp,
-                features=features,
                 frame=frame_for_record,
-                motion_score=self._motion_score,
-                quality_score=1.0,
             )
-            if self.runtime.temporal_history_count >= self.encoder.spec.sequence_length:
+
+        else:
+            # -----------------------------------------------------
+            # 방금 calibration이 완료된 순간부터 fresh TCN
+            # history를 시작한다.
+            # -----------------------------------------------------
+            if not calibration_was_ready:
+                self.runtime.reset_temporal_history()
                 self._face_loss_reset = False
+                self._face_missing_since = None
+
+            if not face_detected:
+                if self._face_missing_since is None:
+                    self._face_missing_since = float(timestamp)
+
+                if (
+                    not self._face_loss_reset
+                    and float(timestamp) - self._face_missing_since + 1e-9
+                    >= self.face_loss_reset_seconds
+                ):
+                    self.runtime.reset_temporal_history()
+                    self._face_loss_reset = True
+
+                outcome = self.runtime.add_frame_only(
+                    timestamp=timestamp,
+                    frame=frame_for_record,
+                )
+
+            else:
+                if self._face_missing_since is not None:
+                    self._face_missing_since = None
+
+                features = self.feature_adapter.from_signal(signal)
+
+                outcome = self.runtime.add_observation(
+                    timestamp=timestamp,
+                    features=features,
+                    frame=frame_for_record,
+                    motion_score=self._motion_score,
+                    quality_score=1.0,
+                )
+
+                # face loss 뒤에는 full causal sequence가 다시 채워져야
+                # 정상 temporal detection으로 돌아간다.
+                if (
+                    self.runtime.temporal_history_count
+                    >= self.encoder.spec.sequence_length
+                ):
+                    self._face_loss_reset = False
+
         if outcome.decision:
             self._latest_decision = dict(outcome.decision)
+
         if outcome.episode:
             self._latest_episode = dict(outcome.episode)
-        self._append_detection(outcome, eventized_timestamp=timestamp)
+
+        self._append_detection(
+            outcome,
+            eventized_timestamp=timestamp,
+        )
+
         requested = (
             (_event_from_dict(outcome.requested_event),)
             if outcome.requested_event is not None
             else ()
         )
-        finalized = tuple(_event_from_dict(payload) for payload in outcome.finalized_events)
+
+        finalized = tuple(
+            _event_from_dict(payload)
+            for payload in outcome.finalized_events
+        )
+
         if finalized:
             self._event_saved_until = float(timestamp) + 3.5
-        return LiveTemporalResult(requested, finalized, outcome)
+
+        return LiveTemporalResult(
+            requested,
+            finalized,
+            outcome,
+        )
 
     def overlay_status(self, *, timestamp: float) -> dict[str, Any]:
         decision = self._latest_decision or {}

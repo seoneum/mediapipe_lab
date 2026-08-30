@@ -26,6 +26,7 @@ from ondamm_models import (
     unique_preserving_order,
 )
 from ondamm_pattern_memory import PatternMemoryStore
+from ondamm_movement_explanation import build_selection_explanation
 from ondamm_recommendations import build_baseline_recommendation
 from ondamm_review import EventReviewStore, LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
 from ondamm_security import build_export_manifest
@@ -324,7 +325,37 @@ class OndammWebService:
     def list_local_clips(self, child_id: str) -> list[dict[str, Any]]:
         dossier = load_dossier(self._validate_child_id(child_id))
         ensure_active(dossier, "list local event clips")
-        return self.clip_catalog.list_clips(dossier.child_id)
+        clips = self.clip_catalog.list_clips(dossier.child_id)
+        try:
+            memory = self._pattern_memory(dossier.child_id).public_state()
+        except FileNotFoundError:
+            memory = {"candidates": [], "known_patterns": []}
+        active_candidates = {
+            str(item.get("candidate_id"))
+            for item in memory.get("candidates", [])
+            if item.get("candidate_id")
+        }
+        active_source_events = {
+            str(event_id)
+            for collection in (memory.get("candidates", []), memory.get("known_patterns", []))
+            for item in collection
+            for event_id in item.get("source_event_ids", [])
+        }
+        for clip in clips:
+            if clip.get("event_type") != "repeating_micro_motion":
+                clip["pattern_memory_status"] = "not_applicable"
+                continue
+            candidate_id = str(clip.get("trigger_values", {}).get("candidate_id") or "")
+            if candidate_id in active_candidates or str(clip.get("event_id")) in active_source_events:
+                clip["pattern_memory_status"] = "active"
+                clip["pattern_memory_notice"] = "현재 개인 패턴 메모리와 연결된 영상입니다."
+            else:
+                clip["pattern_memory_status"] = "orphaned"
+                clip["pattern_memory_notice"] = (
+                    "현재 개인 패턴 메모리에서 이 후보를 찾을 수 없습니다. "
+                    "다른 실험 메모리 또는 초기화 전 데이터일 수 있어 학습·승인 근거로 사용하지 마세요."
+                )
+        return clips
 
     def resolve_local_clip_path(self, child_id: str, clip_id: str) -> Path:
         dossier = load_dossier(self._validate_child_id(child_id))
@@ -492,6 +523,23 @@ class OndammWebService:
         ensure_active(dossier, "review local event clip with LLM")
         clip = self.clip_catalog.resolve_clip(clip_id, child_id=dossier.child_id)
         frame_data_urls = self.frame_extractor(clip.path)
+        public_clip = clip.to_public_dict()
+        local_analysis = self.clip_analyzer(clip.path)
+        movement_summary = public_clip.get("movement_summary") or local_analysis.get("movement_summary")
+        similarity_facts = public_clip.get("similarity_to_previous")
+        selection_explanation = public_clip.get("selection_explanation")
+        if clip.event_type == "repeating_micro_motion" and movement_summary:
+            selection_explanation, similarity_facts = build_selection_explanation(
+                occurrence_count=int(clip.trigger_values.get("occurrence_count", 0) or 0),
+                occurrence_threshold=int(clip.trigger_values.get("occurrence_threshold", 3) or 3),
+                embedding_distance=clip.trigger_values.get("candidate_distance"),
+                movement_summary=movement_summary,
+                regional_comparison=(
+                    similarity_facts.get("regional_comparison")
+                    if isinstance(similarity_facts, dict)
+                    else None
+                ),
+            )
         result = self.frame_reviewer.review(
             frame_data_urls=frame_data_urls,
             event_metadata={
@@ -500,6 +548,16 @@ class OndammWebService:
                 "start_timestamp": clip.start_timestamp,
                 "end_timestamp": clip.end_timestamp,
                 "trigger_values": clip.trigger_values,
+                "event_duration_seconds": public_clip["event_duration_seconds"],
+                "clip_duration_seconds": public_clip["clip_duration_seconds"],
+                "movement_summary": movement_summary,
+                "similarity_to_previous": similarity_facts,
+                "selection_explanation": selection_explanation,
+                "local_mediapipe_analysis": {
+                    "sampled_frame_count": local_analysis.get("sampled_frame_count"),
+                    "analyzed_frame_count": local_analysis.get("analyzed_frame_count"),
+                    "movement_summary": local_analysis.get("movement_summary"),
+                },
             },
         )
         result["clip_id"] = clip.clip_id

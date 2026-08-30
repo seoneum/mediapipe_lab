@@ -110,6 +110,29 @@ class OndammWebApiTests(unittest.TestCase):
         self.assertEqual(item_status, 200)
         self.assertEqual(item["display_name"], "다온")
 
+    def test_session_post_returns_created_record_and_get_reflects_it(self) -> None:
+        status, created = self.router.dispatch(
+            "POST",
+            "/api/dossiers/child-api/sessions",
+            {
+                "title": "퍼즐 활동 기록",
+                "activity_name": "퍼즐 맞추기",
+                "observed_response": "조각을 네 번 선택함",
+                "educator_interpretation": "완료 카드가 순서 이해를 도운 것으로 보임",
+                "approved_by": "teacher-a",
+                "tags": ["퍼즐"],
+            },
+        )
+        get_status, dossier = self.router.dispatch(
+            "GET",
+            "/api/dossiers/child-api",
+            None,
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(get_status, 200)
+        self.assertEqual(dossier["approved_session_summaries"], [created])
+
     def test_router_returns_404_for_unknown_route(self) -> None:
         status, payload = self.router.dispatch("GET", "/api/unknown", None)
 

@@ -72,6 +72,23 @@ class OndammWebServiceTests(unittest.TestCase):
         dossier = self.service.get_dossier("child-web")
         self.assertEqual(dossier["approved_plan_history"], [])
 
+    def test_add_session_returns_and_persists_the_same_record(self) -> None:
+        saved = self.service.add_session(
+            "child-web",
+            {
+                "title": "동물 분류 활동",
+                "activity_name": "동물 분류",
+                "observed_response": "동물 카드를 세 번 선택함",
+                "educator_interpretation": "시각 단서가 참여를 도운 것으로 보임",
+                "approved_by": "teacher-a",
+                "tags": ["분류", "시각 단서"],
+            },
+        )
+
+        dossier = self.service.get_dossier("child-web")
+        self.assertEqual(dossier["approved_session_summaries"], [saved])
+        self.assertEqual(self.service.list_dossiers()[0]["session_count"], 1)
+
     def test_approved_recommendation_is_persisted(self) -> None:
         saved = self.service.approve_recommendation(
             "child-web",

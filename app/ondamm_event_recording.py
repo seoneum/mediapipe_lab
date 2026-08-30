@@ -350,6 +350,26 @@ class LocalEventClipRecorder:
         if not clip_frames:
             raise RuntimeError(f"No buffered frames are available for event clip: {event.event_id}")
 
+        first_timestamp = float(clip_frames[0].timestamp)
+        last_timestamp = float(clip_frames[-1].timestamp)
+        trigger_values = dict(event.trigger_values)
+        trigger_values.update(
+            {
+                "clip_duration_seconds": round(max(0.0, last_timestamp - first_timestamp), 3),
+                "clip_pre_context_seconds": round(max(0.0, event.start_timestamp - first_timestamp), 3),
+                "clip_post_context_seconds": round(max(0.0, last_timestamp - event.end_timestamp), 3),
+            }
+        )
+        event = EventMetadata(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            start_timestamp=event.start_timestamp,
+            end_timestamp=event.end_timestamp,
+            trigger_values=trigger_values,
+            clip_path=event.clip_path,
+            created_at=event.created_at,
+        )
+
         if self.output_format == "mp4":
             clip_path = self._write_mp4(event, clip_frames)
             return event.with_clip_path(str(clip_path))

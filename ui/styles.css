@@ -320,6 +320,25 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .pattern-memory-empty strong { font-size: 14px; }
 .pattern-memory-empty p { max-width: 560px; margin: 8px 0; color: var(--muted); font-size: 9px; line-height: 1.6; }
 .pattern-memory-empty code { color: var(--sage-ink); overflow-wrap: anywhere; }
+
+.selection-reason-card, .movement-summary-card { margin-top: 12px; padding: 14px; border: 1px solid rgba(85, 103, 88, .2); border-radius: 14px; background: rgba(245, 248, 243, .78); }
+.selection-reason-card.warning { border-color: rgba(176, 114, 52, .42); background: rgba(255, 247, 235, .9); }
+.selection-reason-head, .movement-summary-card > div:first-child { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.selection-reason-head span, .movement-summary-card span { color: var(--muted); font-size: 9px; }
+.selection-reason-card p, .movement-summary-card p { margin: 9px 0; font-size: 11px; line-height: 1.65; }
+.selection-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 10px 0; }
+.selection-facts span { padding: 8px; border-radius: 10px; background: rgba(255,255,255,.8); color: var(--muted); font-size: 8px; line-height: 1.4; }
+.selection-facts b { display: block; color: var(--ink); font-size: 13px; }
+.selection-reason-card small, .movement-summary-card small { display: block; color: var(--muted); line-height: 1.5; }
+.movement-summary-card ul { display: grid; gap: 5px; margin: 10px 0; padding: 0; list-style: none; }
+.movement-summary-card li { display: flex; justify-content: space-between; gap: 10px; font-size: 9px; }
+.analysis-quality { margin-bottom: 10px; padding: 8px 10px; border-radius: 10px; font-size: 9px; line-height: 1.5; }
+.analysis-quality.usable { color: var(--sage-ink); background: rgba(223, 236, 219, .7); }
+.analysis-quality.unusable { color: #8b4f21; background: rgba(255, 235, 213, .82); }
+
+@media (max-width: 760px) {
+  .selection-facts { grid-template-columns: 1fr; }
+}
 .pattern-policy-strip { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
 .pattern-policy-strip span { padding: 7px 9px; border-radius: 999px; background: #f0efe8; color: var(--muted); font-size: 8px; }
 .pattern-policy-strip b { margin-left: 4px; color: var(--sage-ink); }

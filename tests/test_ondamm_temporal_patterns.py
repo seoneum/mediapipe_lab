@@ -648,6 +648,78 @@ class TemporalPatternTests(unittest.TestCase):
             self.assertEqual(len(catalog_items), 1)
             self.assertEqual(catalog_items[0]["event_type"], "repeating_micro_motion")
             self.assertEqual(catalog_items[0]["trigger_values"]["occurrence_threshold"], 3)
+    def test_brief_quiet_gap_does_not_split_live_style_episode(self) -> None:
+        detector = MicroMotionEpisodeDetector(
+            EpisodePolicy(
+                onset_threshold=0.2,
+                offset_threshold=0.1,
+                min_duration_seconds=0.2,
+                refractory_seconds=0.5,
+                offset_hold_seconds=0.8,
+            )
+        )
+        embedding = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+        # 움직임 시작
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=1.0,
+                motion_score=0.3,
+                embedding=embedding,
+            )
+        )
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=1.2,
+                motion_score=0.3,
+                embedding=embedding,
+            )
+        )
+
+        # 잠깐 조용해졌지만 0.8초가 안 됨 → 종료 금지
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=1.4,
+                motion_score=0.0,
+                embedding=embedding,
+            )
+        )
+
+        # 중립으로 돌아오는 움직임 → 같은 episode로 계속
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=1.7,
+                motion_score=0.25,
+                embedding=embedding,
+            )
+        )
+
+        # 다시 quiet 시작
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=1.9,
+                motion_score=0.0,
+                embedding=embedding,
+            )
+        )
+
+        self.assertIsNone(
+            detector.add_endpoint(
+                timestamp=2.4,
+                motion_score=0.0,
+                embedding=embedding,
+            )
+        )
+
+        # quiet 0.8초 이상 지속 → 여기서 하나의 episode 확정
+        episode = detector.add_endpoint(
+            timestamp=2.7,
+            motion_score=0.0,
+            embedding=embedding,
+        )
+
+        self.assertIsNotNone(episode)
+        self.assertEqual(episode.endpoint_count, 3)
 
 
 if __name__ == "__main__":
