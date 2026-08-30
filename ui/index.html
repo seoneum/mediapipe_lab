@@ -138,6 +138,15 @@
               <div class="preview-placeholder"><div class="placeholder-lines"><i></i><i></i><i></i></div><h3>초안이 여기에 표시됩니다</h3><p>왼쪽에서 목표를 입력하면 근거와 제안 활동을 검토할 수 있습니다.</p></div>
             </article>
           </div>
+          <article class="card local-rag-card">
+            <div class="local-rag-head"><div><p class="eyebrow">허용된 로컬 자료만 검색</p><h3>로컬 데이터 검색·대화</h3><p>승인 기록과 metadata-backed 이벤트 영상 목록을 아동별로 검색합니다. raw 영상·얼굴 embedding·미승인 검토 내용은 RAG 문맥에 넣지 않습니다.</p></div><span id="local-rag-status" class="local-only-pill">연결 확인 중</span></div>
+            <form id="local-rag-form" class="local-rag-form">
+              <label class="rag-scope-label">검색 범위<select name="scope"><option value="all">승인 기록 + 이벤트 영상</option><option value="records">승인 기록만</option><option value="videos">이벤트 영상만</option></select></label>
+              <label class="rag-question-label">질문 또는 영상 검색어<textarea name="question" required maxlength="1000" placeholder="예: 입 주변 움직임이 세 번째로 반복된 영상과 당시 확인된 지원을 찾아줘"></textarea></label>
+              <div class="rag-form-actions"><button class="button button-secondary" type="submit">로컬에서 검색·대화</button><button class="button button-quiet" id="local-rag-reset" type="button">대화 지우기</button></div>
+            </form>
+            <div id="local-rag-result" class="local-rag-result"><p>질문을 입력하면 답, source ID와 일치하는 영상 링크를 표시합니다. 대화와 검색 vector는 영구 저장되지 않습니다.</p></div>
+          </article>
           <div class="section-subheading"><div><p class="eyebrow">학습 프로그램</p><h3>구조화된 학습 프로그램</h3><p>시각 도입부터 기록까지 5단계 수업 흐름을 미리 봅니다.</p></div><button class="button button-quiet" id="learning-plan-button" type="button">현재 목표로 5단계 보기</button></div>
           <div id="learning-plan" class="learning-steps"></div>
           <div class="section-subheading history-heading"><div><p class="eyebrow">승인 이력</p><h3>승인된 활동 계획</h3></div></div>

@@ -4,6 +4,9 @@ const state = {
   tab: "overview",
   recommendationPayload: null,
   recommendationDraft: null,
+  ragResult: null,
+  ragHistory: [],
+  ragBusy: false,
   integrations: null,
   clips: [],
   selectedClipId: null,
@@ -141,6 +144,9 @@ async function selectChild(childId) {
   localStorage.setItem("ondamm-selected-child", childId);
   state.recommendationPayload = null;
   state.recommendationDraft = null;
+  state.ragResult = null;
+  state.ragHistory = [];
+  state.ragBusy = false;
   state.clipAnalysis = null;
   state.gptReview = null;
   state.eventReviews = null;
@@ -148,7 +154,7 @@ async function selectChild(childId) {
   state.patternBusy = null;
   if (!state.integrations) {
     state.integrations = await api("/api/integrations").catch(() => ({
-      mediapipe: { configured: false }, openai: { configured: false, model: null },
+      mediapipe: { configured: false }, openai: { configured: false, model: null }, llm: { configured: false },
     }));
   }
   await loadLocalClips({ preserveSelection: false, silent: true });
@@ -221,6 +227,7 @@ function renderCurrent() {
   renderSessions();
   renderPlans();
   renderRecommendationPlaceholder();
+  renderLocalRag();
   $("#learning-plan").innerHTML = "";
   $("#sensing-result").innerHTML = `<div class="preview-placeholder"><span class="draft-stamp">초안</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>`;
   renderClipReview();
@@ -424,7 +431,8 @@ function renderClipReview() {
 
   const selected = state.clips.find((clip) => clip.clip_id === state.selectedClipId) || state.clips[0];
   const mediaPipe = state.integrations?.mediapipe || { configured: false };
-  const openAI = state.integrations?.openai || { configured: false };
+  const llm = state.integrations?.llm || { configured: false };
+  const localLlm = llm.provider === "ollama" && llm.local_only;
   const triggerMarkup = Object.entries(selected.trigger_values || {}).map(([key, value]) => `
     <span><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join("") || `<span><b>trigger</b>메타데이터 없음</span>`;
   const expressionEntries = Object.entries(state.clipAnalysis?.expression_label_counts || {});
@@ -435,13 +443,13 @@ function renderClipReview() {
       <p>${escapeHtml(state.clipAnalysis.non_diagnostic_notice || "얼굴 미세 움직임 힌트이며 감정 상태로 확정하지 않습니다.")}</p>
     </div>` : `<div class="analysis-placeholder">선택 영상을 이 Mac 안에서만 샘플링해 얼굴 blendshape 움직임을 확인합니다.</div>`;
   const gptMarkup = state.gptReview ? `
-    <div class="gpt-result"><div class="gpt-result-head"><strong>GPT 관찰 보조 초안</strong><span>${escapeHtml(state.gptReview.model || "GPT")}</span></div><div class="gpt-text">${escapeHtml(state.gptReview.review_text).replace(/\n/g, "<br>")}</div><p>전체 영상 전송 안 함 · 추출 프레임 ${state.gptReview.remote_frame_count}장 · 기록철 자동 반영 안 함</p></div>` : "";
+    <div class="gpt-result"><div class="gpt-result-head"><strong>${state.gptReview.local_only ? "Ollama 로컬" : "GPT 원격"} 관찰 보조 초안</strong><span>${escapeHtml(state.gptReview.model || "LLM")}</span></div><div class="gpt-text">${escapeHtml(state.gptReview.review_text).replace(/\n/g, "<br>")}</div><p>전체 영상 전송 안 함 · 로컬 프레임 ${state.gptReview.local_frame_count || 0}장 · 원격 프레임 ${state.gptReview.remote_frame_count || 0}장 · 기록철 자동 반영 안 함</p></div>` : "";
 
   workspace.innerHTML = `
     <div class="integration-strip card">
       <div><span class="integration-dot ready"></span><strong>MediaPipe</strong><small>로컬 얼굴 blendshape</small></div>
-      <div><span class="integration-dot ${openAI.configured ? "ready" : "off"}"></span><strong>GPT</strong><small>${openAI.configured ? escapeHtml(openAI.model || "연결됨") : "OPENAI_API_KEY 필요"}</small></div>
-      <p>GPT는 버튼을 누르고 동의한 경우에만 영상에서 추출한 최대 3장 프레임을 전송합니다.</p>
+      <div><span class="integration-dot ${llm.configured && llm.available !== false ? "ready" : "off"}"></span><strong>${localLlm ? "Ollama" : "GPT"}</strong><small>${llm.configured ? escapeHtml(llm.model || "연결됨") : "LLM 꺼짐"}</small></div>
+      <p>${localLlm ? "Ollama는 추출 프레임을 이 실행 기기의 localhost에서만 처리합니다." : "GPT는 동의한 경우에만 최대 3장 프레임을 원격 전송합니다."}</p>
     </div>
     <div class="clip-review-grid">
       <aside class="card clip-list-panel">
@@ -466,11 +474,11 @@ function renderClipReview() {
           <button class="button button-secondary full-button" id="run-mediapipe-analysis" type="button" ${state.clipBusy || !mediaPipe.configured ? "disabled" : ""}>${state.clipBusy === "mediapipe" ? "로컬 분석 중…" : "MediaPipe로 분석"}</button>
         </div>
         <div class="analysis-block gpt-block">
-          <div class="clip-panel-head"><div><span>선택적 원격 검토</span><strong>GPT 프레임 검토</strong></div><span class="remote-pill">최대 3장</span></div>
-          ${openAI.configured ? `
-            <label class="consent-check"><input type="checkbox" id="gpt-frame-consent"><span>선택 영상에서 추출한 프레임을 OpenAI API로 전송하는 데 동의합니다. 전체 MP4는 전송하지 않습니다.</span></label>
-            <button class="button button-quiet full-button" id="run-gpt-review" type="button" ${state.clipBusy ? "disabled" : ""}>${state.clipBusy === "gpt" ? "GPT 검토 중…" : "동의 후 GPT 검토"}</button>` : `
-            <div class="key-missing"><strong>GPT 연결 대기</strong><p>서버 실행 전에 환경 변수 <code>OPENAI_API_KEY</code>를 설정하세요. 키는 브라우저로 전달되지 않습니다.</p></div>`}
+          <div class="clip-panel-head"><div><span>${localLlm ? "선택적 로컬 검토" : "선택적 원격 검토"}</span><strong>${localLlm ? "Ollama" : "GPT"} 프레임 검토</strong></div><span class="${localLlm ? "local-only-pill" : "remote-pill"}">최대 3장</span></div>
+          ${llm.configured && llm.available !== false ? `
+            ${localLlm ? `<p class="local-review-note">추출 JPEG는 localhost Ollama에만 전달되며 디스크에 별도 저장하지 않습니다.</p>` : `<label class="consent-check"><input type="checkbox" id="gpt-frame-consent"><span>선택 영상에서 추출한 프레임을 OpenAI API로 전송하는 데 동의합니다. 전체 MP4는 전송하지 않습니다.</span></label>`}
+            <button class="button button-quiet full-button" id="run-llm-review" type="button" ${state.clipBusy ? "disabled" : ""}>${state.clipBusy === "gpt" ? "LLM 검토 중…" : (localLlm ? "Ollama로 로컬 검토" : "동의 후 GPT 검토")}</button>` : `
+            <div class="key-missing"><strong>LLM 연결 대기</strong><p>${localLlm ? "Ollama daemon과 모델 상태를 확인하세요." : "ONDAMM_LLM_PROVIDER와 provider 설정을 확인하세요."}</p></div>`}
           ${gptMarkup}
         </div>
       </article>
@@ -508,6 +516,32 @@ function renderRecommendation(draft) {
       <h4>근거</h4><ul>${draft.rationale_lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
       <div class="approval-box"><label>최종 승인자<input id="recommendation-approver" value="${escapeHtml(state.recommendationPayload.drafted_by)}"></label><button class="button button-primary" id="approve-recommendation" type="button">검토 후 승인 저장</button></div>
     </div>`;
+}
+
+function renderLocalRag() {
+  const status = $("#local-rag-status");
+  const result = $("#local-rag-result");
+  const form = $("#local-rag-form");
+  if (!status || !result || !form) return;
+  const llm = state.integrations?.llm || { configured: false };
+  const ready = llm.configured && llm.available !== false && llm.provider === "ollama" && llm.rag_configured;
+  status.textContent = ready ? `${llm.model || "Ollama"} · ${llm.context_length ? `${Math.round(llm.context_length / 1024)}K · ` : ""}로컬` : "Ollama RAG 꺼짐";
+  form.querySelector("button").disabled = !ready || state.ragBusy || state.current?.canonical_status !== "active";
+  form.querySelector("button").textContent = state.ragBusy ? "로컬 검색 중…" : "로컬에서 검색·대화";
+  if (!state.ragResult && !state.ragHistory.length) {
+    result.innerHTML = ready
+      ? `<p>질문을 입력하면 답, source ID와 일치하는 영상 링크를 표시합니다. 대화와 vector는 영구 저장되지 않습니다.</p>`
+      : `<p><code>ONDAMM_LLM_PROVIDER=ollama</code>와 로컬 Ollama 모델을 준비한 뒤 웹 서버를 다시 시작하세요.</p>`;
+    return;
+  }
+  const latest = state.ragResult || { sources: [], video_results: [] };
+  const sources = latest.sources || [];
+  const videos = latest.video_results || [];
+  const conversation = state.ragHistory.map((message) => `<article class="rag-message ${message.role}"><span>${message.role === "user" ? "질문" : "로컬 보조 답변"}</span><p>${escapeHtml(message.content).replace(/\n/g, "<br>")}</p></article>`).join("");
+  result.innerHTML = `<div class="rag-conversation">${conversation}</div>
+    <p class="rag-local-notice">로컬 처리 · 대화/vector 영구 저장 안 함 · 기록철 자동 반영 안 함</p>
+    ${videos.length ? `<div class="rag-video-results"><strong>찾은 이벤트 영상</strong>${videos.map((video) => `<article><div><span>${escapeHtml(eventTypeName(video.event_type))}</span><strong>${escapeHtml(formatDate(video.created_at, true))}</strong><small>${Number(video.duration_seconds).toFixed(1)}초 · ${escapeHtml(video.source_id)}</small></div><button class="button button-quiet" type="button" data-rag-clip-id="${escapeHtml(video.clip_id)}">기존 플레이어에서 열기</button></article>`).join("")}</div>` : ""}
+    <div class="rag-sources"><strong>검색 근거</strong>${sources.length ? sources.map((source) => `<article><code>${escapeHtml(source.source_id)}</code><span>${source.source_kind === "video" ? "영상 메타데이터 · 미검토" : "승인 기록"}</span><p>${escapeHtml(source.excerpt || "")}</p></article>`).join("") : `<p>사용할 로컬 근거가 없습니다.</p>`}</div>`;
 }
 
 async function refreshCurrent() {
@@ -619,6 +653,70 @@ $("#recommendation-preview").addEventListener("click", async (event) => {
     toast("검토한 활동 계획을 승인 기록으로 저장했습니다.");
     await refreshCurrent(); setTab("plan");
   } catch (error) { toast(error.message, "error"); }
+});
+
+$("#local-rag-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+  const question = formData.get("question").trim();
+  const scope = formData.get("scope");
+  if (!question) return toast("검색하거나 물어볼 내용을 입력해 주세요.", "error");
+  state.ragBusy = true;
+  state.ragResult = null;
+  renderLocalRag();
+  try {
+    state.ragResult = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/assistant/query`, {
+      method: "POST", body: {
+        question,
+        scope,
+        top_k: 8,
+        history: state.ragHistory.slice(-6).map((message) => ({
+          role: message.role,
+          content: message.content.slice(0, 1800),
+        })),
+      },
+    });
+    state.ragHistory.push(
+      { role: "user", content: question },
+      { role: "assistant", content: state.ragResult.answer },
+    );
+    state.ragHistory = state.ragHistory.slice(-8);
+    event.currentTarget.elements.question.value = "";
+    toast(`로컬 자료에서 답변과 영상 ${state.ragResult.video_results?.length || 0}개를 찾았습니다.`);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.ragBusy = false;
+    renderLocalRag();
+  }
+});
+
+$("#local-rag-reset").addEventListener("click", () => {
+  state.ragHistory = [];
+  state.ragResult = null;
+  renderLocalRag();
+  toast("브라우저 메모리의 로컬 대화 내용을 지웠습니다.");
+});
+
+$("#local-rag-result").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-rag-clip-id]");
+  if (!button) return;
+  const clipId = button.dataset.ragClipId;
+  if (!state.clips.some((clip) => clip.clip_id === clipId)) {
+    await loadLocalClips({ preserveSelection: true });
+  }
+  if (!state.clips.some((clip) => clip.clip_id === clipId)) {
+    return toast("해당 영상이 현재 로컬 catalog에 없습니다.", "error");
+  }
+  state.selectedClipId = clipId;
+  state.clipAnalysis = null;
+  state.gptReview = null;
+  await loadEventReviews({ silent: true });
+  setTab("observation");
+  renderClipReview();
+  renderPatternMemory();
+  document.querySelector("#clip-review-title")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  toast("찾은 영상을 기존 검토 플레이어에서 열었습니다.");
 });
 
 $("#learning-plan-button").addEventListener("click", async () => {
@@ -734,16 +832,17 @@ $("#clip-review-workspace").addEventListener("click", async (event) => {
     }
     return;
   }
-  if (event.target.closest("#run-gpt-review")) {
+  if (event.target.closest("#run-llm-review")) {
+    const llm = state.integrations?.llm || {};
     const consent = $("#gpt-frame-consent")?.checked === true;
-    if (!consent) return toast("추출 프레임 원격 전송 동의를 먼저 확인해 주세요.", "error");
+    if (llm.requires_explicit_frame_consent && !consent) return toast("추출 프레임 원격 전송 동의를 먼저 확인해 주세요.", "error");
     state.clipBusy = "gpt";
     renderClipReview();
     try {
-      state.gptReview = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/clips/${encodeURIComponent(state.selectedClipId)}/gpt-review`, {
-        method: "POST", body: { confirm_remote_frame_upload: true },
+      state.gptReview = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/clips/${encodeURIComponent(state.selectedClipId)}/llm-review`, {
+        method: "POST", body: { confirm_remote_frame_upload: consent },
       });
-      toast("GPT 관찰 보조 초안을 받았습니다. 공식 기록에는 반영되지 않았습니다.");
+      toast(`${state.gptReview.local_only ? "Ollama 로컬" : "GPT 원격"} 관찰 보조 초안을 받았습니다. 공식 기록에는 반영되지 않았습니다.`);
     } catch (error) {
       toast(error.message, "error");
     } finally {

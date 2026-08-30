@@ -176,7 +176,77 @@ open http://127.0.0.1:8765
 - 아동이 직접 누르는 큰 **촬영 싫어요 · 중단** 버튼과 실행 중 카메라의 중단 상태 확인
 - 철회 후 삭제 대상 미리보기, 확인 문구 기반 실제 삭제와 비식별 삭제 확인서
 
-원격 GPT 프레임 검토는 선택 기능입니다. 전체 영상을 보내지 않고 제한된 축소 JPEG frame만 전송하며, UI에서 매번 명시적으로 동의해야 합니다.
+### 로컬 Ollama LLM과 승인 기록 RAG
+
+Ollama를 명시적으로 선택하면 이벤트 프레임 검토와 아동별 RAG를 모두 localhost에서
+처리할 수 있습니다. M5 Pro 48GB 개발 장비의 기본 생성 모델은 text/image 입력을
+지원하는 `qwen3.8:27b-mlx`, 검색 embedding은 `embeddinggemma`입니다. 생성 모델은
+약 18GB이고 API 요청 context는 16K로 제한합니다. 모델 파일은 `~/.ollama/models`에
+남으며 Git에 포함되지 않습니다.
+
+```bash
+# https://ollama.com/download/mac 에서 공식 Ollama.app 설치 후 실행
+open -a Ollama
+ollama pull qwen3.8:27b-mlx
+ollama pull embeddinggemma
+
+bash scripts/ondamm_ollama_web.sh
+open http://127.0.0.1:8765
+```
+
+직접 환경 변수를 설정할 수도 있습니다.
+
+```bash
+export ONDAMM_LLM_PROVIDER=ollama
+export ONDAMM_OLLAMA_URL='http://127.0.0.1:11434'
+export ONDAMM_OLLAMA_MODEL='qwen3.8:27b-mlx'
+export ONDAMM_OLLAMA_EMBED_MODEL='embeddinggemma'
+export ONDAMM_OLLAMA_NUM_CTX=16384
+bash scripts/ondamm_web.sh
+```
+
+실행 wrapper는 exact model tag를 확인하고 로컬 digest prefix를 고정합니다. 웹 서비스는
+`/api/tags`와 `/api/show`에서 digest, architecture, completion/vision capability와 embedding
+capability를 다시 검사합니다. 모델 누락, digest 불일치, image 미지원, 빈 응답이면 다른
+모델로 자동 대체하지 않고 실행을 중단합니다. 실제 model tag, context와 digest는
+`/api/integrations` 상태에도 표시됩니다.
+
+웹 UI의 **다음 활동 → 로컬 데이터 검색·대화**에서 다음 범위를 선택할 수 있습니다.
+
+- **승인 기록 + 이벤트 영상**: 지원 근거와 관련 영상 locator를 함께 검색
+- **승인 기록만**: 확인된 선호·회피·지원 전략·인수인계 메모, 승인된 수업·활동 계획
+- **이벤트 영상만**: 현재 아동의 `LocalClipCatalog`가 인정한 metadata-backed MP4 목록
+
+영상 검색은 raw MP4나 frame을 embedding하지 않습니다. event type, 생성 시각, 길이와
+allowlist에 포함된 관찰 trigger만 `embeddinggemma`로 검색하고, 결과의 **기존 플레이어에서
+열기** 버튼이 기존 관찰 보조 영상·MediaPipe·교차 검토 화면으로 이동시킵니다. trigger의
+embedding/vector, raw path, 임의의 대형 값과 미승인 review comment는 검색 문맥에서
+제외합니다.
+
+각 질문의 검색 vector는 요청이 끝나면 버리고, 대화 이력은 현재 브라우저 메모리에서
+최대 8개 message만 유지합니다. 서버·dossier에 대화나 답변을 저장하지 않으며 아동을
+바꾸거나 **대화 지우기**를 누르면 브라우저 이력도 초기화합니다. 답변과 영상 locator에는
+source ID를 함께 표시하며 dossier를 자동 변경하지 않습니다.
+
+이벤트 검토에서는 전체 MP4가 아니라 최대 3장의 축소 JPEG만 같은 기기의 Ollama에
+전달됩니다. OpenAI와 달리 원격 프레임 전송 동의는 필요하지 않지만, 활성 dossier와
+기존 촬영·아동 권리 게이트는 그대로 적용됩니다.
+
+Qwen3.8 연동은 synthetic dossier/JPEG와 성인 자기검증 기록으로 먼저 확인했고, 실제
+브라우저에서 한국어 대화, 범위별 검색, 영상 결과 카드와 기존 플레이어 이동을 검증했습니다.
+실제 카메라와 27B 모델을 동시에 장시간 실행하는 부하 테스트는 아직 하지 않았으므로
+카메라 실사용 전에는 성인 자기검증으로 FPS·메모리·응답 지연을 별도 측정해야 합니다.
+
+빠른 rollback이 필요하면 설치된 2B 모델을 명시적으로 선택합니다. 자동 fallback은 없습니다.
+
+```bash
+ONDAMM_OLLAMA_MODEL='qwen3-vl:2b-instruct' \
+ONDAMM_OLLAMA_NUM_CTX=8192 \
+bash scripts/ondamm_ollama_web.sh
+```
+
+원격 GPT 프레임 검토도 선택 기능으로 유지됩니다. 전체 영상을 보내지 않고 제한된
+축소 JPEG frame만 전송하며, UI에서 매번 명시적으로 동의해야 합니다.
 
 ```bash
 export OPENAI_API_KEY='your-api-key'
@@ -352,7 +422,7 @@ POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/watch
 
 ```bash
 .venv/bin/python -m pytest -q
-# 371 passed, 3 skipped, 72 subtests passed
+# 382 passed, 3 skipped, 72 subtests passed
 ```
 
 세 개의 실제 held-out checkpoint에 대해서도 엄격한 contract로 79-D 입력에서

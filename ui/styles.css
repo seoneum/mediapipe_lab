@@ -246,6 +246,38 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .plan-item header { display: flex; justify-content: space-between; gap: 12px; }
 .plan-item header span { color: var(--sage-ink); background: var(--sage); padding: 4px 7px; border-radius: 999px; font-size: 8px; font-weight: 850; }
 .plan-item p { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.local-rag-card { margin-top: 14px; padding: 22px; }
+.local-rag-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.local-rag-head h3 { margin: 0; font-size: 16px; }
+.local-rag-head p:not(.eyebrow) { max-width: 680px; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.local-rag-form { display: grid; grid-template-columns: 190px minmax(280px,1fr) auto; gap: 12px; align-items: end; }
+.local-rag-form label { margin: 0; }
+.local-rag-form .rag-question-label { min-width: 0; }
+.local-rag-form textarea { min-height: 68px; }
+.local-rag-form .button { margin-bottom: 1px; }
+.rag-form-actions { display: grid; gap: 7px; }
+.local-rag-result { margin-top: 14px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.rag-conversation { display: grid; gap: 8px; max-height: 420px; overflow: auto; }
+.rag-message { max-width: 88%; padding: 11px 13px; border-radius: 12px; }
+.rag-message.user { justify-self: end; background: var(--ink); color: white; }
+.rag-message.assistant { justify-self: start; background: #eef2ea; color: var(--ink); }
+.rag-message span { display: block; margin-bottom: 5px; font-size: 8px; font-weight: 850; opacity: .7; }
+.rag-message p { margin: 0; line-height: 1.65; }
+.rag-local-notice { margin: 10px 0; font-size: 9px; }
+.rag-video-results { display: grid; gap: 7px; margin-top: 14px; }
+.rag-video-results > strong { color: var(--ink); }
+.rag-video-results article { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 11px; border: 1px solid #cbd8cf; border-radius: 10px; background: #f4f8f3; }
+.rag-video-results article span, .rag-video-results article strong, .rag-video-results article small { display: block; }
+.rag-video-results article span { color: var(--sage-ink); font-size: 9px; font-weight: 800; }
+.rag-video-results article strong { margin-top: 3px; color: var(--ink); font-size: 10px; }
+.rag-video-results article small { margin-top: 3px; color: var(--muted); font-size: 8px; }
+.rag-sources { display: grid; gap: 7px; margin-top: 12px; }
+.rag-sources > strong { color: var(--ink); }
+.rag-sources article { padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fbfaf5; }
+.rag-sources article code { color: var(--sage-ink); }
+.rag-sources article span { margin-left: 8px; color: var(--muted); font-size: 8px; }
+.rag-sources article p { margin: 6px 0 0; }
+.local-review-note { color: var(--muted); font-size: 9px; line-height: 1.55; }
 
 .observation-layout { display: grid; grid-template-columns: minmax(340px, .9fr) minmax(360px, 1.1fr); gap: 14px; }
 .camera-stage { overflow: hidden; padding-bottom: 21px; }
@@ -461,6 +493,8 @@ body.locked .button-primary:not(#status-submit), body.locked [data-action="new-s
   .clip-analysis-panel .analysis-block + .analysis-block { border-top: 0; border-left: 1px solid var(--line); }
   .role-review-grid { grid-template-columns: 1fr 1fr 1fr; }
   .rights-grid { grid-template-columns: 1fr; }
+  .local-rag-form { grid-template-columns: 170px 1fr; }
+  .rag-form-actions { grid-column: 1 / -1; grid-template-columns: 1fr auto; }
 }
 
 @media (max-width: 760px) {
@@ -486,6 +520,10 @@ body.locked .button-primary:not(#status-submit), body.locked [data-action="new-s
   .timeline-item { grid-template-columns: 1fr; gap: 12px; }
   .timeline-meta { border-right: 0; border-bottom: 1px solid #e6e3d9; padding-bottom: 10px; }
   .observation-pair, .boundary-grid { grid-template-columns: 1fr; }
+  .local-rag-head { display: grid; }
+  .local-rag-form { grid-template-columns: 1fr; }
+  .rag-form-actions { grid-column: auto; grid-template-columns: 1fr; }
+  .rag-video-results article { align-items: flex-start; flex-direction: column; }
   .rights-summary { grid-template-columns: 1fr; }
   .child-stop-button { min-height: 44px; max-width: 112px; padding: 0 10px; font-size: 11px; }
   .pattern-promotion-form, .pattern-suppression-form { grid-template-columns: 1fr; }

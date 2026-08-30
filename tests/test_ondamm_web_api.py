@@ -177,6 +177,121 @@ class OndammWebApiTests(unittest.TestCase):
         self.assertEqual(len(self.gpt_review_calls), 1)
         self.assertEqual(self.service.get_dossier("child-api")["approved_session_summaries"], [])
 
+    def test_local_ollama_clip_review_requires_no_remote_upload_consent(self) -> None:
+        calls = []
+
+        class LocalClient:
+            embedding_model = "embeddinggemma"
+
+            @staticmethod
+            def ping():
+                return {"version": "test-local"}
+
+        class LocalReviewer:
+            provider = "ollama"
+            local_only = True
+            requires_remote_frame_consent = False
+            model = "qwen3-vl:2b-instruct"
+            client = LocalClient()
+
+            @staticmethod
+            def review(*, frame_data_urls, event_metadata):
+                calls.append((frame_data_urls, event_metadata))
+                return {
+                    "provider": "ollama",
+                    "model": "qwen3-vl:2b-instruct",
+                    "review_text": "로컬에서만 검토했습니다.",
+                    "local_frame_count": len(frame_data_urls),
+                    "remote_frame_count": 0,
+                    "whole_video_uploaded": False,
+                    "local_only": True,
+                    "dossier_auto_updated": False,
+                }
+
+        self.service.frame_reviewer = LocalReviewer()
+        self.service.gpt_reviewer = self.service.frame_reviewer
+        self.service.llm_provider = "ollama"
+        clip_id = self.service.list_local_clips("child-api")[0]["clip_id"]
+
+        status, result = self.router.dispatch(
+            "POST",
+            f"/api/dossiers/child-api/clips/{clip_id}/llm-review",
+            {},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result["local_frame_count"], 2)
+        self.assertEqual(result["remote_frame_count"], 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.service.get_dossier("child-api")["approved_session_summaries"], [])
+
+    def test_local_rag_route_uses_child_dossier_and_never_writes_back(self) -> None:
+        calls = []
+
+        class FakeRag:
+            @staticmethod
+            def answer(*, dossier, question, top_k, clips, scope, history):
+                calls.append((dossier.child_id, question, top_k, clips, scope, history))
+                return {
+                    "provider": "ollama",
+                    "answer": "승인된 로컬 근거만 사용했습니다.",
+                    "sources": [{"source_id": "dossier:confirmed_preferences:1"}],
+                    "video_results": [],
+                    "local_only": True,
+                    "vectors_persisted": False,
+                    "dossier_auto_updated": False,
+                }
+
+        self.service.rag_assistant = FakeRag()
+        before = self.service.get_dossier("child-api")
+        status, result = self.router.dispatch(
+            "POST",
+            "/api/dossiers/child-api/assistant/query",
+            {
+                "question": "어떤 활동부터 시작할까요?",
+                "top_k": 3,
+                "scope": "all",
+                "history": [{"role": "user", "content": "이전 질문"}],
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(calls[0][0:3], ("child-api", "어떤 활동부터 시작할까요?", 3))
+        self.assertEqual(calls[0][3][0]["child_id"], "child-api")
+        self.assertEqual(calls[0][4], "all")
+        self.assertEqual(calls[0][5], [{"role": "user", "content": "이전 질문"}])
+        self.assertTrue(result["local_only"])
+        self.assertFalse(result["dossier_auto_updated"])
+        self.assertEqual(self.service.get_dossier("child-api"), before)
+
+    def test_ollama_integration_status_reports_local_provider(self) -> None:
+        class LocalClient:
+            embedding_model = "embeddinggemma"
+
+            @staticmethod
+            def ping():
+                return {"version": "test-local"}
+
+        class LocalReviewer:
+            provider = "ollama"
+            local_only = True
+            requires_remote_frame_consent = False
+            model = "qwen3-vl:2b-instruct"
+            client = LocalClient()
+
+        self.service.frame_reviewer = LocalReviewer()
+        self.service.gpt_reviewer = self.service.frame_reviewer
+        self.service.llm_provider = "ollama"
+        self.service.rag_assistant = type("Rag", (), {"client": LocalClient()})()
+
+        status, integrations = self.router.dispatch("GET", "/api/integrations", None)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(integrations["ollama"]["configured"])
+        self.assertTrue(integrations["ollama"]["available"])
+        self.assertTrue(integrations["llm"]["local_only"])
+        self.assertFalse(integrations["llm"]["requires_explicit_frame_consent"])
+
     def test_event_clip_cross_review_route_keeps_roles_separate_from_dossier(self) -> None:
         clip_id = self.service.list_local_clips("child-api")[0]["clip_id"]
 

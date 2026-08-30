@@ -16,6 +16,7 @@ from uuid import uuid4
 from ondamm_cli import render_handoff_markdown
 from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
+from ondamm_ollama import OllamaClient, OllamaDossierRag, OllamaFrameReviewer
 from ondamm_models import (
     ConsentGrant,
     Dossier,
@@ -101,6 +102,8 @@ class OndammWebService:
         event_review_store: EventReviewStore | None = None,
         clip_analyzer: Callable[[Path], dict[str, Any]] = analyze_clip_with_mediapipe,
         gpt_reviewer: Any | None = None,
+        llm_reviewer: Any | None = None,
+        rag_assistant: Any | None = None,
         frame_extractor: Callable[[Path], list[str]] = extract_video_frame_data_urls,
         pattern_memory_root: Path | None = None,
     ) -> None:
@@ -114,12 +117,51 @@ class OndammWebService:
             pattern_memory_root or (Path(ondamm_paths.ONDAMM_EXPORTS) / "pattern-memory")
         ).expanduser().resolve()
         self._browser_media_cache: dict[str, Path] = {}
-        if gpt_reviewer is not None:
-            self.gpt_reviewer = gpt_reviewer
+        self.rag_assistant = rag_assistant
+        self.ollama_model_status: dict[str, Any] | None = None
+        self.llm_provider = "none"
+        if llm_reviewer is not None:
+            self.frame_reviewer = llm_reviewer
+            self.llm_provider = getattr(llm_reviewer, "provider", "custom")
+        elif gpt_reviewer is not None:
+            self.frame_reviewer = gpt_reviewer
+            self.llm_provider = getattr(gpt_reviewer, "provider", "openai")
         else:
             api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-            model = os.environ.get("ONDAMM_GPT_MODEL", "gpt-5.6").strip() or "gpt-5.6"
-            self.gpt_reviewer = OpenAIFrameReviewer(api_key=api_key, model=model) if api_key else None
+            requested_provider = os.environ.get("ONDAMM_LLM_PROVIDER", "").strip().lower()
+            provider = requested_provider or ("openai" if api_key else "none")
+            if provider == "ollama":
+                try:
+                    timeout_seconds = float(os.environ.get("ONDAMM_OLLAMA_TIMEOUT_SECONDS", "120"))
+                except ValueError as exc:
+                    raise ValueError("ONDAMM_OLLAMA_TIMEOUT_SECONDS must be numeric") from exc
+                try:
+                    num_ctx = int(os.environ.get("ONDAMM_OLLAMA_NUM_CTX", "16384"))
+                except ValueError as exc:
+                    raise ValueError("ONDAMM_OLLAMA_NUM_CTX must be an integer") from exc
+                ollama_client = OllamaClient(
+                    base_url=os.environ.get("ONDAMM_OLLAMA_URL", "http://127.0.0.1:11434"),
+                    chat_model=os.environ.get("ONDAMM_OLLAMA_MODEL", "qwen3.8:27b-mlx"),
+                    embedding_model=os.environ.get("ONDAMM_OLLAMA_EMBED_MODEL", "embeddinggemma"),
+                    timeout_seconds=timeout_seconds,
+                    num_ctx=num_ctx,
+                    expected_chat_digest=os.environ.get("ONDAMM_OLLAMA_MODEL_DIGEST"),
+                )
+                self.ollama_model_status = ollama_client.verify_models(require_vision=True)
+                self.frame_reviewer = OllamaFrameReviewer(ollama_client)
+                self.rag_assistant = self.rag_assistant or OllamaDossierRag(ollama_client)
+                self.llm_provider = "ollama"
+            elif provider == "openai":
+                model = os.environ.get("ONDAMM_GPT_MODEL", "gpt-5.6").strip() or "gpt-5.6"
+                self.frame_reviewer = OpenAIFrameReviewer(api_key=api_key, model=model) if api_key else None
+                self.llm_provider = "openai"
+            elif provider in {"", "none", "off"}:
+                self.frame_reviewer = None
+                self.llm_provider = "none"
+            else:
+                raise ValueError("ONDAMM_LLM_PROVIDER must be ollama, openai, or none")
+        # Backward-compatible name for callers that still use the legacy GPT route.
+        self.gpt_reviewer = self.frame_reviewer
 
     def list_dossiers(self) -> list[dict[str, Any]]:
         return [
@@ -433,21 +475,24 @@ class OndammWebService:
         ensure_active(dossier, "keep temporal movement candidate under observation")
         return self._pattern_memory(dossier.child_id).mark_watch(candidate_id=candidate_id)
 
-    def review_local_clip_with_gpt(
+    def review_local_clip_with_llm(
         self,
         child_id: str,
         clip_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if payload.get("confirm_remote_frame_upload") is not True:
-            raise ValidationError("GPT 검토 전에 선택 영상의 추출 프레임 원격 전송에 명시적으로 동의해야 합니다.")
-        if self.gpt_reviewer is None:
-            raise ValidationError("OPENAI_API_KEY가 설정되지 않아 GPT 검토를 사용할 수 없습니다.")
+        if self.frame_reviewer is None:
+            raise ValidationError("사용 가능한 LLM 관찰 보조 provider가 없습니다.")
+        requires_remote_consent = bool(
+            getattr(self.frame_reviewer, "requires_remote_frame_consent", self.llm_provider == "openai")
+        )
+        if requires_remote_consent and payload.get("confirm_remote_frame_upload") is not True:
+            raise ValidationError("원격 LLM 검토 전에 추출 프레임 전송에 명시적으로 동의해야 합니다.")
         dossier = load_dossier(self._validate_child_id(child_id))
-        ensure_active(dossier, "review local event clip with GPT")
+        ensure_active(dossier, "review local event clip with LLM")
         clip = self.clip_catalog.resolve_clip(clip_id, child_id=dossier.child_id)
         frame_data_urls = self.frame_extractor(clip.path)
-        result = self.gpt_reviewer.review(
+        result = self.frame_reviewer.review(
             frame_data_urls=frame_data_urls,
             event_metadata={
                 "event_id": clip.event_id,
@@ -462,7 +507,49 @@ class OndammWebService:
         result["dossier_auto_updated"] = False
         return result
 
+    def review_local_clip_with_gpt(
+        self,
+        child_id: str,
+        clip_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for the existing route and API tests."""
+        return self.review_local_clip_with_llm(child_id, clip_id, payload)
+
+    def query_local_rag(self, child_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "query approved support records with local RAG")
+        if self.rag_assistant is None:
+            raise ValidationError("로컬 Ollama RAG가 설정되지 않았습니다.")
+        raw_top_k = payload.get("top_k", 5)
+        if isinstance(raw_top_k, bool) or not isinstance(raw_top_k, int):
+            raise ValidationError("top_k must be an integer")
+        raw_history = payload.get("history", [])
+        if not isinstance(raw_history, list):
+            raise ValidationError("history must be a list")
+        try:
+            return self.rag_assistant.answer(
+                dossier=dossier,
+                question=required_text(payload, "question"),
+                top_k=raw_top_k,
+                clips=self.clip_catalog.list_clips(dossier.child_id),
+                scope=optional_text(payload, "scope", "records") or "records",
+                history=raw_history,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
     def integrations_status(self) -> dict[str, Any]:
+        configured = self.frame_reviewer is not None
+        local_only = bool(getattr(self.frame_reviewer, "local_only", False)) if configured else False
+        available = configured
+        api_version = None
+        if self.llm_provider == "ollama" and configured:
+            try:
+                status = self.frame_reviewer.client.ping()
+                api_version = status.get("version")
+            except RuntimeError:
+                available = False
         return {
             "mediapipe": {
                 "configured": True,
@@ -470,10 +557,38 @@ class OndammWebService:
                 "local_only": True,
             },
             "openai": {
-                "configured": self.gpt_reviewer is not None,
-                "model": getattr(self.gpt_reviewer, "model", None),
+                "configured": configured and self.llm_provider == "openai",
+                "model": getattr(self.frame_reviewer, "model", None) if self.llm_provider == "openai" else None,
                 "whole_video_uploaded": False,
                 "requires_explicit_frame_consent": True,
+            },
+            "ollama": {
+                "configured": configured and self.llm_provider == "ollama",
+                "available": available if self.llm_provider == "ollama" else False,
+                "model": getattr(self.frame_reviewer, "model", None) if self.llm_provider == "ollama" else None,
+                "embedding_model": getattr(getattr(self.rag_assistant, "client", None), "embedding_model", None),
+                "api_version": api_version,
+                "model_digest": (self.ollama_model_status or {}).get("chat_digest"),
+                "model_architecture": (self.ollama_model_status or {}).get("chat_architecture"),
+                "capabilities": (self.ollama_model_status or {}).get("chat_capabilities", []),
+                "context_length": (self.ollama_model_status or {}).get("configured_context_length"),
+                "local_only": True,
+                "rag_configured": self.rag_assistant is not None and self.llm_provider == "ollama",
+                "requires_explicit_frame_consent": False,
+            },
+            "llm": {
+                "configured": configured,
+                "available": available,
+                "provider": self.llm_provider,
+                "model": getattr(self.frame_reviewer, "model", None),
+                "model_digest": (self.ollama_model_status or {}).get("chat_digest"),
+                "context_length": (self.ollama_model_status or {}).get("configured_context_length"),
+                "local_only": local_only,
+                "rag_configured": self.rag_assistant is not None,
+                "whole_video_uploaded": False,
+                "requires_explicit_frame_consent": bool(
+                    getattr(self.frame_reviewer, "requires_remote_frame_consent", self.llm_provider == "openai")
+                ) if configured else False,
             },
         }
 
@@ -699,6 +814,8 @@ class ApiRouter:
                 return 200, self.service.analyze_local_clip(child_id, segments[4])
             if len(segments) == 6 and segments[3] == "clips" and segments[5] == "gpt-review" and method == "POST":
                 return 200, self.service.review_local_clip_with_gpt(child_id, segments[4], body)
+            if len(segments) == 6 and segments[3] == "clips" and segments[5] == "llm-review" and method == "POST":
+                return 200, self.service.review_local_clip_with_llm(child_id, segments[4], body)
             if len(segments) == 6 and segments[3] == "clips" and segments[5] == "reviews":
                 if method == "GET":
                     return 200, self.service.get_event_reviews(child_id, segments[4])
@@ -714,6 +831,8 @@ class ApiRouter:
                 return 201, self.service.approve_recommendation(child_id, body)
             if len(segments) == 5 and segments[3:] == ["learning-plan", "preview"] and method == "POST":
                 return 200, self.service.preview_learning_plan(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["assistant", "query"] and method == "POST":
+                return 200, self.service.query_local_rag(child_id, body)
             if len(segments) == 5 and segments[3:] == ["sensing", "demo"] and method == "POST":
                 return 200, self.service.preview_sensing_demo(child_id, body)
             if len(segments) == 5 and segments[3:] == ["handoff", "export"] and method == "POST":
