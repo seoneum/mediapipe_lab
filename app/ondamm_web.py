@@ -385,9 +385,11 @@ class OndammWebService:
             actor_id=pattern["approved_by"],
             details={
                 "pattern_id": pattern["pattern_id"],
+                "display_name": pattern["display_name"],
                 "prototype_digest": pattern["prototype_digest"],
                 "encoder_digest": pattern["encoder_digest"],
                 "source_event_ids": pattern["source_event_ids"],
+                "approved_by": pattern["approved_by"],
                 "model_store": "outputs/ondamm/pattern-memory",
             },
         )

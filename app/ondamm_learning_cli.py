@@ -79,6 +79,18 @@ def append_unique_events(target: list[EventMetadata], events: list[EventMetadata
             known.add(event.event_id)
 
 
+def show_camera_preview(preview: np.ndarray | None, *, headless: bool) -> int | None:
+    """Display one local frame only when an operator explicitly uses a GUI."""
+    if headless:
+        return None
+    if preview is None:
+        raise ValueError("preview frame is required outside headless mode")
+    import cv2
+
+    cv2.imshow("ON DAMM live micro-motion demo", preview)
+    return cv2.waitKey(1) & 0xFF
+
+
 def resolve_temporal_checkpoint(value: str | None) -> Path | None:
     if value:
         path = Path(value).expanduser().resolve()
@@ -321,6 +333,29 @@ def run_camera_mode(
         extractor.close()
         raise RuntimeError(f"Could not open camera index {args.camera}")
 
+    preview_server = None
+    if args.debug_preview:
+        from ondamm_debug_preview import DebugPreviewServer
+
+        preview_server = DebugPreviewServer(
+            host=args.debug_preview_host,
+            port=args.debug_preview_port,
+            jpeg_quality=args.debug_preview_jpeg_quality,
+            allow_remote_bind=args.allow_remote_debug_preview,
+        )
+        try:
+            preview_server.start()
+        except Exception:
+            cap.release()
+            extractor.close()
+            raise
+        print(f"debug_preview: {preview_server.url}preview.mjpg")
+        if args.debug_preview_host in {"127.0.0.1", "::1", "localhost"}:
+            print(
+                "ssh_hint: ssh -L "
+                f"{args.debug_preview_port}:127.0.0.1:{args.debug_preview_port} huro@<host>"
+            )
+
     frame_index = 0
     previous_loop = time.perf_counter()
     fps_ema = 0.0
@@ -395,8 +430,9 @@ def run_camera_mode(
                 append_unique_events(detected_events, temporal_result.requested_events)
                 append_unique_events(recorded_events, temporal_result.finalized_events)
 
-            if not args.headless:
-                if args.debug_overlay:
+            preview = None
+            if args.debug_preview or not args.headless:
+                if args.debug_overlay or args.debug_preview:
                     status_after = (
                         temporal_demo.overlay_status(timestamp=elapsed)
                         if temporal_demo is not None
@@ -409,8 +445,10 @@ def run_camera_mode(
                     cv2.putText(preview, f"face={face_present}", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
                     cv2.putText(preview, f"gaze={gaze_zone}", (16, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
                     cv2.putText(preview, f"movement={','.join(movement_labels) or 'none'}", (16, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
-                cv2.imshow("ON DAMM live micro-motion demo", preview)
-                key = cv2.waitKey(1) & 0xFF
+            if preview_server is not None and preview is not None:
+                preview_server.publish(preview)
+            key = show_camera_preview(preview, headless=args.headless)
+            if key is not None:
                 if key in (27, ord("q"), ord("Q")):
                     break
                 if key in (ord("b"), ord("B")) and args.demo_dino:
@@ -427,6 +465,8 @@ def run_camera_mode(
             append_unique_events(recorded_events, temporal_result.finalized_events)
         extractor.close()
         cap.release()
+        if preview_server is not None:
+            preview_server.stop()
         if not args.headless:
             cv2.destroyAllWindows()
     return RunCapture(
@@ -502,16 +542,12 @@ def resolve_clips_dir(output_dir: Path) -> Path:
 
 
 def prepare_output_dirs(output_dir: Path, clips_dir: Path, *, record_events: bool) -> None:
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"Output directory is not empty; choose a new --output-dir to preserve existing data: {output_dir}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
-    stale_event_metadata = output_dir / "event_recording.json"
-    if stale_event_metadata.exists():
-        stale_event_metadata.unlink()
-    if clips_dir.exists():
-        for pattern in ("*.mp4", "*.npz"):
-            for path in clips_dir.glob(pattern):
-                if path.is_file():
-                    path.unlink()
-    elif record_events:
+    if record_events:
         clips_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -548,6 +584,19 @@ def main() -> None:
     parser.add_argument("--clip-fps", type=float, default=30.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--debug-overlay", action="store_true", help="Render and record the ON DAMM landmark/demo overlay")
+    parser.add_argument(
+        "--debug-preview",
+        action="store_true",
+        help="Publish the annotated live frame over an opt-in local HTTP MJPEG endpoint",
+    )
+    parser.add_argument("--debug-preview-host", default="127.0.0.1")
+    parser.add_argument("--debug-preview-port", type=int, default=8766)
+    parser.add_argument("--debug-preview-jpeg-quality", type=int, default=82)
+    parser.add_argument(
+        "--allow-remote-debug-preview",
+        action="store_true",
+        help="Required before binding the unauthenticated debug preview to a non-loopback host",
+    )
     parser.add_argument("--demo-dino", action="store_true", help="Enable optional local DINO heatmap inference")
     parser.add_argument("--dino-every", type=int, default=3)
     parser.add_argument("--demo", action="store_true")
@@ -584,6 +633,12 @@ def main() -> None:
         raise ValueError("--movement-min-seconds must be positive")
     if args.dino_every <= 0:
         raise ValueError("--dino-every must be positive")
+    if not 1 <= args.debug_preview_port <= 65535:
+        raise ValueError("--debug-preview-port must be between 1 and 65535")
+    if not 30 <= args.debug_preview_jpeg_quality <= 95:
+        raise ValueError("--debug-preview-jpeg-quality must be between 30 and 95")
+    if args.allow_remote_debug_preview and not args.debug_preview:
+        raise ValueError("--allow-remote-debug-preview requires --debug-preview")
     if args.temporal_calibration_seconds < 0:
         raise ValueError("--temporal-calibration-seconds must be non-negative")
     if args.temporal_onset_z <= 0 or not 0 <= args.temporal_offset_z < args.temporal_onset_z:

@@ -126,6 +126,11 @@ class MicroMotionRuntime:
         for event in finalized:
             if event.clip_path:
                 self._append_recorded_event(event)
+        if not allow_incomplete_tail:
+            # A process shutdown cannot manufacture future post-event frames.
+            # Ready clips are already persisted above; any incomplete request and
+            # remaining frame history stay ephemeral and are discarded.
+            self.clip_recorder.discard_buffered()
         return RuntimeOutcome(
             episode.to_summary() if episode else None,
             decision.to_dict() if decision else None,
@@ -152,22 +157,25 @@ class MicroMotionRuntime:
         ):
             return decision, None
         event = EventMetadata.create(
-            event_type="temporal_movement_candidate",
+            event_type="repeating_micro_motion",
             start_timestamp=episode.start_timestamp,
             end_timestamp=episode.end_timestamp,
             trigger_values={
                 "lifecycle": decision.lifecycle,
                 "candidate_id": decision.candidate_id,
                 "occurrence_count": decision.occurrence_count,
+                "occurrence_threshold": self.pattern_memory.policy.min_occurrences_for_clip,
+                "motion_score": episode.peak_motion_score,
                 "novelty_score": decision.novelty_score,
-                "nearest_distance": decision.distance,
+                "candidate_distance": decision.distance,
+                "nearest_known_pattern": decision.nearest_known_pattern,
+                "nearest_known_distance": decision.nearest_known_distance,
                 "duration_seconds": episode.duration_seconds,
                 "quality_score": episode.quality_score,
                 "encoder_digest": self.encoder.encoder_digest,
                 "raw_media_policy": "current threshold-crossing episode only",
             },
         )
-        self.pattern_memory.attach_source_event(candidate_id=decision.candidate_id, event_id=event.event_id)
         return decision, self.clip_recorder.record_event(event)
 
     def _finalize_ready(self, timestamp: float) -> list[EventMetadata]:
@@ -195,6 +203,9 @@ class MicroMotionRuntime:
     def _append_recorded_event(self, event: EventMetadata) -> None:
         if not event.clip_path:
             return
+        candidate_id = event.trigger_values.get("candidate_id")
+        if isinstance(candidate_id, str) and candidate_id:
+            self.pattern_memory.attach_source_event(candidate_id=candidate_id, event_id=event.event_id)
         path = self.event_metadata_path
         if path.is_file():
             try:

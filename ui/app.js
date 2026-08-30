@@ -278,7 +278,7 @@ function renderPlans() {
 }
 
 function eventTypeName(value) {
-  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림", facial_movement_detected: "지정 미세 움직임", temporal_movement_candidate: "새 반복 패턴 후보" })[value] || value || "이벤트";
+  return ({ gaze_diverted: "시선 구역 변화", face_missing: "얼굴 프레임 이탈", posture_shifted: "자세 쏠림", facial_movement_detected: "지정 미세 움직임", temporal_movement_candidate: "새 반복 패턴 후보", repeating_micro_motion: "새 반복 미세 움직임 후보" })[value] || value || "이벤트";
 }
 
 function candidateClip(candidateId) {

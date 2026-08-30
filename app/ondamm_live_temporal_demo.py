@@ -111,6 +111,7 @@ class LiveTemporalDemo:
             event_metadata_path=event_metadata_path,
         )
         self._latest_decision: dict[str, Any] | None = None
+        self._latest_episode: dict[str, Any] | None = None
         self._motion_score = 0.0
         self._event_saved_until = float("-inf")
 
@@ -138,6 +139,8 @@ class LiveTemporalDemo:
         )
         if outcome.decision:
             self._latest_decision = dict(outcome.decision)
+        if outcome.episode:
+            self._latest_episode = dict(outcome.episode)
         requested = (
             (_event_from_dict(outcome.requested_event),)
             if outcome.requested_event is not None
@@ -150,6 +153,8 @@ class LiveTemporalDemo:
 
     def overlay_status(self, *, timestamp: float) -> dict[str, Any]:
         decision = self._latest_decision or {}
+        episode = self._latest_episode or {}
+        tail_ready = self.runtime.clip_recorder.has_ready_pending(current_timestamp=timestamp)
         return {
             "temporal_enabled": True,
             "checkpoint": self.checkpoint_path.name,
@@ -161,11 +166,16 @@ class LiveTemporalDemo:
             "pattern_id": decision.get("pattern_id"),
             "occurrence_count": decision.get("occurrence_count", 0),
             "occurrence_threshold": self.occurrence_threshold,
-            "event_saved": float(timestamp) <= self._event_saved_until,
+            "nearest_known_pattern": decision.get("nearest_known_pattern"),
+            "nearest_known_distance": decision.get("nearest_known_distance"),
+            "quality_score": episode.get("quality_score", 1.0),
+            # The tail-ready frame is included in the atomic persistence call
+            # immediately after this status is rendered.
+            "event_saved": tail_ready or float(timestamp) <= self._event_saved_until,
         }
 
     def close(self, *, timestamp: float) -> LiveTemporalResult:
-        outcome = self.runtime.close(timestamp=timestamp, allow_incomplete_tail=True)
+        outcome = self.runtime.close(timestamp=timestamp, allow_incomplete_tail=False)
         if outcome.decision:
             self._latest_decision = dict(outcome.decision)
         requested = (

@@ -265,6 +265,14 @@ class LocalEventClipRecorder:
             del self._pending_events[event_id]
         return ready
 
+    def has_ready_pending(self, *, current_timestamp: float) -> bool:
+        """Return whether the current frame completes a requested post tail."""
+        return any(
+            float(current_timestamp) + 1e-9
+            >= event.end_timestamp + self.policy.clip_tail_seconds
+            for event in self._pending_events.values()
+        )
+
     def flush_pending(self, *, current_timestamp: float, allow_incomplete_tail: bool = False) -> list[EventMetadata]:
         """Finalize ready clips at shutdown; incomplete tails stay pending by default."""
         if not allow_incomplete_tail:
@@ -300,7 +308,7 @@ class LocalEventClipRecorder:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         clip_frames = self._select_frames(event, clip_end_override=clip_end_override)
         if not clip_frames:
-            return event
+            raise RuntimeError(f"No buffered frames are available for event clip: {event.event_id}")
 
         if self.output_format == "mp4":
             clip_path = self._write_mp4(event, clip_frames)

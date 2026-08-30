@@ -128,7 +128,7 @@ DINOv3 ViT-S/16은 gated 모델이어서 저장소에 포함하지 않습니다.
 # 예: outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
 ```
 
-checkpoint가 없거나 feature 순서·TCN shape이 맞지 않으면 runtime은 즉시 실패합니다. 학습되지 않은 random encoder로 조용히 fallback하지 않습니다. checkpoint 파일 자체는 실행 결과이므로 저장소에 포함하지 않습니다.
+checkpoint가 없거나 feature 순서·TCN shape이 맞지 않으면 runtime은 즉시 실패합니다. 학습되지 않은 random encoder로 조용히 fallback하지 않습니다. 제품 실행 시 `.pt`와 같은 디렉터리의 `config.json`을 하나의 배포 묶음으로 취급해야 합니다. runtime은 manifest의 checkpoint SHA-256, 79개 feature 순서, normalization 통계, architecture와 학습 provenance를 모두 확인하며 하나라도 다르면 실행하지 않습니다. checkpoint 파일 자체는 실행 결과이므로 저장소에 포함하지 않습니다.
 
 TCN stride 5의 겹치는 window는 반복 횟수로 세지 않습니다. `MicroMotionEpisodeDetector`가 onset/offset hysteresis, 최소 지속시간, refractory를 적용해 독립 episode로 합친 뒤 `PatternMemoryStore`가 child별 known prototype과 unknown micro-cluster를 비교합니다.
 
@@ -270,6 +270,54 @@ checkpoint를 지정하지 않으면 가장 최근 `outputs/micro_expression/v4_
 
 실제 headless 운용은 동일 명령에 `--headless`를 추가합니다. detector와 저장 정책은 그대로이고 OpenCV 창만 표시하지 않습니다.
 
+### huro headless 실행과 Mac SSH 미리보기
+
+X11 forwarding이나 원격 `cv2.imshow()`를 사용하지 않습니다. 카메라는 huro의
+`ondamm_learning_cli.py` 한 프로세스만 열고, 같은 프로세스가 만든 annotation
+frame을 opt-in MJPEG server에 전달합니다. 미리보기는 기본적으로 꺼져 있고,
+켜더라도 인증 없는 endpoint가 외부망에 노출되지 않도록 `127.0.0.1:8766`에만
+bind합니다.
+
+Mac terminal에서 먼저 tunnel을 엽니다.
+
+```bash
+ssh \
+  -L 8765:127.0.0.1:8765 \
+  -L 8766:127.0.0.1:8766 \
+  huro@<host>
+```
+
+SSH로 접속한 huro terminal 1에서 ON DAMM UI를 실행합니다.
+
+```bash
+bash scripts/ondamm_web.sh --host 127.0.0.1 --port 8765
+```
+
+huro terminal 2에서 single-camera runtime과 debug preview를 실행합니다.
+
+```bash
+bash scripts/ondamm_learning.sh \
+  --child-id demo-child \
+  --duration-seconds 60 \
+  --record-events \
+  --debug-overlay \
+  --debug-preview \
+  --debug-preview-host 127.0.0.1 \
+  --debug-preview-port 8766 \
+  --headless \
+  --require-temporal
+```
+
+그다음 Mac browser에서 다음 두 주소를 엽니다.
+
+- ON DAMM UI: `http://127.0.0.1:8765`
+- 실시간 skeleton preview: `http://127.0.0.1:8766`
+
+`--debug-preview`를 빼면 preview server 자체가 시작되지 않습니다. 비-loopback
+주소로 bind하려면 `--allow-remote-debug-preview`가 추가로 필요하지만, 인증이 없는
+발표용 stream이므로 SSH tunnel 방식에서는 사용하지 마세요. preview server는
+JPEG 최신본만 RAM에 보관하며 카메라를 열거나 디스크에 영상을 쓰지 않습니다.
+
 촬영 중 overlay 상태는 다음 순서로 바뀝니다.
 
 ```text
@@ -295,6 +343,26 @@ POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/watch
 ```
 
 승격은 기존 event review와 별개의 명시적 행위입니다. 합의가 생겼다는 이유로 dossier나 TCN을 자동 변경하지 않습니다.
+
+### 현재 구현 검증 상태
+
+2026-08-30 기준으로 temporal runtime, 독립 episode 계산, 1·2회 영상 미저장,
+3회째 post-tail 지연 저장, headless 경로, local-only MJPEG preview, 역할별 검토,
+명시적 pattern 승격과 승격 후 KNOWN 재검출을 자동 테스트했습니다.
+
+```bash
+.venv/bin/python -m pytest -q
+# 371 passed, 3 skipped, 72 subtests passed
+```
+
+세 개의 실제 held-out checkpoint에 대해서도 엄격한 contract로 79-D 입력에서
+64-D embedding이 생성되고 최신 checkpoint가 자동 선택되는 smoke test를
+통과했습니다. ON DAMM UI와 합성 annotation MJPEG stream은 로컬 브라우저에서
+렌더링과 console error 부재를 확인했습니다.
+
+자동 테스트가 huro 현장 검증을 대신하지는 않습니다. 실제 제출 촬영 전에는
+카메라 권한과 장치 번호, MediaPipe landmark 품질, 세 독립 움직임의 candidate
+일치 여부, MP4 codec, Mac↔huro SSH tunnel을 실제 장비에서 확인해야 합니다.
 
 ## 오프라인 영상 분석기
 

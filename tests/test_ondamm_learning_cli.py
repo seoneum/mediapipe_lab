@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "app"
@@ -20,10 +23,20 @@ from ondamm_learning_cli import (  # noqa: E402
     normalize_demo_event,
     prepare_output_dirs,
     resolve_clips_dir,
+    show_camera_preview,
 )
 
 
 class OnDammLearningCliTests(unittest.TestCase):
+    def test_headless_does_not_call_imshow(self) -> None:
+        with patch("cv2.imshow") as imshow:
+            result = show_camera_preview(
+                np.zeros((8, 8, 3), dtype=np.uint8),
+                headless=True,
+            )
+        self.assertIsNone(result)
+        imshow.assert_not_called()
+
     def test_deterministic_demo_finished_at_handles_minute_rollover(self) -> None:
         self.assertEqual(
             deterministic_demo_finished_at(61.0),
@@ -47,7 +60,7 @@ class OnDammLearningCliTests(unittest.TestCase):
         self.assertEqual(normalized.end_timestamp, 3.6)
         self.assertEqual(normalized.created_at, "2026-01-01T00:00:00+00:00")
 
-    def test_prepare_output_dirs_clears_stale_recording_artifacts_for_no_record_run(self) -> None:
+    def test_prepare_output_dirs_refuses_to_delete_existing_recording_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-learning-cli-") as temp_dir:
             root = Path(temp_dir)
             output_dir = root / "run"
@@ -57,10 +70,11 @@ class OnDammLearningCliTests(unittest.TestCase):
             (output_dir / "event_recording.json").write_text("{}", encoding="utf-8")
             (clips_dir / "old.mp4").write_bytes(b"old")
 
-            prepare_output_dirs(output_dir, clips_dir, record_events=False)
+            with self.assertRaises(FileExistsError):
+                prepare_output_dirs(output_dir, clips_dir, record_events=False)
 
-            self.assertFalse((output_dir / "event_recording.json").exists())
-            self.assertEqual(list(clips_dir.glob("*")), [])
+            self.assertTrue((output_dir / "event_recording.json").exists())
+            self.assertEqual((clips_dir / "old.mp4").read_bytes(), b"old")
 
     def test_resolve_clips_dir_keeps_recordings_inside_output_dir(self) -> None:
         output_dir = Path("/tmp/ondamm-run-root")

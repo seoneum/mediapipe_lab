@@ -69,7 +69,16 @@ def render_demo_overlay(
     _text(preview, "ON:DAMM  LIVE MICRO-MOTION", 28, 40, color=(92, 242, 207), scale=0.64, thickness=2)
     _text(preview, "LOCAL ONLY  |  NO FULL-SESSION VIDEO", 28, 62, color=(175, 190, 205), scale=0.42)
     face_color = (70, 220, 120) if face_detected else (60, 80, 245)
-    _text(preview, f"FACE {'TRACKED' if face_detected else 'NOT DETECTED'}", 28, 88, color=face_color, thickness=2)
+    quality = int(round(100 * np.clip(_number(status.get("quality_score"), 1.0 if face_detected else 0.0), 0.0, 1.0)))
+    fps = _number(status.get("fps"))
+    _text(
+        preview,
+        f"FACE {'TRACKED' if face_detected else 'NOT DETECTED'}  |  QUALITY {quality}%  |  FPS {fps:0.1f}",
+        28,
+        88,
+        color=face_color,
+        thickness=2,
+    )
 
     eyes = np.mean(
         [
@@ -104,8 +113,10 @@ def render_demo_overlay(
     threshold = int(status.get("occurrence_threshold") or 3)
     lifecycle = str(status.get("lifecycle") or "WAITING FOR EPISODE")
     candidate = str(status.get("candidate_id") or status.get("pattern_id") or "-")
+    nearest = status.get("nearest_known_pattern") or "none"
+    nearest_distance = _number(status.get("nearest_known_distance"), 1.0)
     _text(preview, f"{lifecycle}", 28, 244, color=(220, 225, 235), thickness=2)
-    _text(preview, f"{candidate}", 28, 267, color=(180, 195, 210))
+    _text(preview, f"{candidate}  |  nearest {nearest}  d={nearest_distance:0.3f}", 28, 267, color=(180, 195, 210))
     _text(preview, f"REPEAT  {occurrence} / {threshold}", 28, 293, color=(92, 242, 207), scale=0.64, thickness=2)
 
     if status.get("event_saved"):

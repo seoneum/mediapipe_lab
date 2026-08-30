@@ -87,23 +87,53 @@ class OndammDemoCaptureTests(unittest.TestCase):
     def test_live_demo_saves_only_third_independent_episode_with_overlay_clip(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-live-demo-") as temp_dir:
             root = Path(temp_dir)
+            feature_names = tuple(
+                ["bs_a"]
+                + [f"bs_fixture_{index:02d}" for index in range(51)]
+                + ["geom_abs_mouth_width"]
+                + [f"geom_abs_fixture_{index:02d}" for index in range(17)]
+                + ["motion_mouth"]
+                + [f"motion_fixture_{index:02d}" for index in range(8)]
+            )
             spec = TemporalEncoderSpec(
-                feature_names=("bs_a", "geom_abs_mouth_width", "motion_mouth"),
-                sequence_length=3,
-                stride_frames=1,
-                channels=(4,),
-                embedding_dim=4,
+                feature_names=feature_names,
+                sequence_length=60,
+                stride_frames=5,
+                channels=(64, 64, 64),
+                kernel_size=3,
+                dropout=0.2,
+                embedding_dim=64,
             )
             model = build_torch_encoder(spec)
             for value in model.state_dict().values():
                 value.fill_(0.1)
             checkpoint = root / "encoder.pt"
-            export_temporal_encoder_checkpoint(
+            digest = export_temporal_encoder_checkpoint(
                 checkpoint,
                 spec=spec,
                 model_state_dict=model.state_dict(),
-                normalization_mean=[0.0, 0.0, 0.0],
-                normalization_std=[1.0, 1.0, 1.0],
+                normalization_mean=np.zeros(79, dtype=np.float32),
+                normalization_std=np.ones(79, dtype=np.float32),
+                metadata={
+                    "held_out_participant": "fixture-held-out",
+                    "train_participants": ["fixture-train-a", "fixture-train-b"],
+                    "best_epoch": 1,
+                    "normalization": "fixture robust center/scale",
+                },
+            )
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "features": list(feature_names),
+                        "feature_counts": {"blendshape": 52, "geometry": 18, "motion": 9, "total": 79},
+                        "sequence": {"causal": True, "seq_len_frames": 60, "stride_frames": 5},
+                        "model": {"channels": "64,64,64", "kernel_size": 3},
+                        "encoder_checkpoints": {
+                            "fixture": {"path": str(checkpoint), "sha256": digest}
+                        },
+                    }
+                ),
+                encoding="utf-8",
             )
             demo = LiveTemporalDemo(
                 child_id="demo-child",
@@ -124,37 +154,32 @@ class OndammDemoCaptureTests(unittest.TestCase):
                 post_seconds=0.2,
             )
             frame = np.zeros((48, 64, 3), dtype=np.uint8)
-            schedule = [
-                (0.0, 0.0),
-                (0.1, 0.0),
-                (0.2, 0.02),
-                (0.4, 0.02),
-                (0.6, 0.0),
-                (1.2, 0.02),
-                (1.4, 0.02),
-                (1.6, 0.0),
-                (2.2, 0.02),
-                (2.4, 0.02),
-                (2.6, 0.0),
-                (2.8, 0.0),
-            ]
+            schedule = []
+            for index in range(126):
+                timestamp = round(index * 0.1, 3)
+                moving = any(start <= timestamp <= start + 1.0 for start in (6.0, 8.0, 10.0))
+                schedule.append((timestamp, 0.02 if moving else 0.0))
             requested = []
             finalized = []
+            tail_ready_overlay_seen = False
             for timestamp, motion in schedule:
                 signal = demo_signal(motion=motion)
-                overlay = render_demo_overlay(frame, signal, demo.overlay_status(timestamp=timestamp))
+                status = demo.overlay_status(timestamp=timestamp)
+                tail_ready_overlay_seen = tail_ready_overlay_seen or bool(status["event_saved"])
+                overlay = render_demo_overlay(frame, signal, status)
                 result = demo.process(timestamp=timestamp, signal=signal, frame_for_record=overlay)
                 requested.extend(result.requested_events)
                 finalized.extend(result.finalized_events)
 
             self.assertEqual(len(requested), 1)
             self.assertEqual(len(finalized), 1)
+            self.assertTrue(tail_ready_overlay_seen)
             self.assertEqual(finalized[0].trigger_values["occurrence_count"], 3)
             self.assertTrue(Path(finalized[0].clip_path).is_file())
             metadata = json.loads((root / "event_recording.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["recorded_event_count"], 1)
-            self.assertEqual(metadata["events"][0]["event_type"], "temporal_movement_candidate")
-            state = demo.overlay_status(timestamp=2.8)
+            self.assertEqual(metadata["events"][0]["event_type"], "repeating_micro_motion")
+            state = demo.overlay_status(timestamp=12.5)
             self.assertTrue(state["event_saved"])
             self.assertEqual(state["occurrence_count"], 3)
 

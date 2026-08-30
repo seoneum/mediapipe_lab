@@ -92,6 +92,8 @@ class PatternDecision:
     novelty_score: float
     clip_required: bool
     strong_candidate: bool
+    nearest_known_pattern: str | None = None
+    nearest_known_distance: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +106,8 @@ class PatternDecision:
             "novelty_score": self.novelty_score,
             "clip_required": self.clip_required,
             "strong_candidate": self.strong_candidate,
+            "nearest_known_pattern": self.nearest_known_pattern,
+            "nearest_known_distance": self.nearest_known_distance,
         }
 
 
@@ -213,6 +217,8 @@ class PatternMemoryStore:
                     novelty_score=round(distance, 6),
                     clip_required=False,
                     strong_candidate=False,
+                    nearest_known_pattern=item["pattern_id"],
+                    nearest_known_distance=round(distance, 6),
                 )
                 return self._remember_decision(metadata, vectors, decision)
 
@@ -298,6 +304,8 @@ class PatternMemoryStore:
                 novelty_score=round(float(nearest_known_distance), 6),
                 clip_required=clip_required,
                 strong_candidate=count >= self.policy.strong_candidate_occurrences,
+                nearest_known_pattern=known[0]["pattern_id"] if known else None,
+                nearest_known_distance=round(float(nearest_known_distance), 6),
             )
             return self._remember_decision(metadata, vectors, decision)
 
@@ -445,6 +453,10 @@ class PatternMemoryStore:
             raise RuntimeError("could not read pattern memory metadata") from exc
         if metadata.get("encoder_digest") != self.encoder_digest:
             raise RuntimeError("pattern memory encoder digest does not match the active encoder")
+        if metadata.get("schema_version") != self.SCHEMA_VERSION:
+            raise RuntimeError("unsupported temporal pattern memory schema")
+        if metadata.get("child_id") != self.child_id:
+            raise RuntimeError("pattern memory child_id does not match the active child")
         if int(metadata.get("embedding_dimension", 0)) != self.embedding_dimension:
             raise RuntimeError("pattern memory embedding dimension does not match the active encoder")
         vectors: dict[str, np.ndarray] = {}

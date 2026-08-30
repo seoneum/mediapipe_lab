@@ -35,6 +35,20 @@ FORBIDDEN_FEATURES = {
     "target",
 }
 
+PRODUCT_FEATURE_COUNTS = {
+    "blendshape": 52,
+    "geometry": 18,
+    "motion": 9,
+    "total": 79,
+}
+PRODUCT_SEQUENCE_LENGTH = 60
+PRODUCT_STRIDE_FRAMES = 5
+PRODUCT_CHANNELS = (64, 64, 64)
+PRODUCT_KERNEL_SIZE = 3
+PRODUCT_DROPOUT = 0.2
+PRODUCT_EMBEDDING_DIM = 64
+CHECKPOINT_SCHEMA_VERSION = 1
+
 
 def _finite_vector(values: Sequence[float], *, name: str) -> np.ndarray:
     vector = np.asarray(values, dtype=np.float32)
@@ -57,6 +71,88 @@ def validate_feature_names(names: Sequence[str]) -> tuple[str, ...]:
         if not (name.startswith("bs_") or name.startswith("geom_abs_") or name.startswith("motion_")):
             raise ValueError(f"unsupported temporal encoder feature: {name}")
     return normalized
+
+
+def _validate_product_spec(spec: "TemporalEncoderSpec") -> None:
+    names = spec.feature_names
+    counts = {
+        "blendshape": sum(name.startswith("bs_") for name in names),
+        "geometry": sum(name.startswith("geom_abs_") for name in names),
+        "motion": sum(name.startswith("motion_") for name in names),
+        "total": len(names),
+    }
+    if counts != PRODUCT_FEATURE_COUNTS:
+        raise RuntimeError(
+            "product temporal encoder requires exactly "
+            "52 blendshape + 18 geometry + 9 motion features"
+        )
+    expected_groups = (
+        (0, PRODUCT_FEATURE_COUNTS["blendshape"], "bs_"),
+        (
+            PRODUCT_FEATURE_COUNTS["blendshape"],
+            PRODUCT_FEATURE_COUNTS["blendshape"] + PRODUCT_FEATURE_COUNTS["geometry"],
+            "geom_abs_",
+        ),
+        (
+            PRODUCT_FEATURE_COUNTS["blendshape"] + PRODUCT_FEATURE_COUNTS["geometry"],
+            PRODUCT_FEATURE_COUNTS["total"],
+            "motion_",
+        ),
+    )
+    if any(not all(name.startswith(prefix) for name in names[start:end]) for start, end, prefix in expected_groups):
+        raise RuntimeError("product temporal encoder feature groups are out of order")
+    expected_architecture = (
+        PRODUCT_SEQUENCE_LENGTH,
+        PRODUCT_STRIDE_FRAMES,
+        PRODUCT_CHANNELS,
+        PRODUCT_KERNEL_SIZE,
+        PRODUCT_DROPOUT,
+        PRODUCT_EMBEDDING_DIM,
+    )
+    architecture = (
+        spec.sequence_length,
+        spec.stride_frames,
+        spec.channels,
+        spec.kernel_size,
+        spec.dropout,
+        spec.embedding_dim,
+    )
+    if architecture != expected_architecture:
+        raise RuntimeError(
+            "product temporal encoder architecture must be "
+            "60 frames / stride 5 / channels 64,64,64 / kernel 3 / dropout 0.2 / embedding 64"
+        )
+
+
+def _load_product_manifest(checkpoint_path: Path) -> tuple[tuple[str, ...], str]:
+    manifest_path = checkpoint_path.parent / "config.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"missing temporal checkpoint provenance manifest: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("could not read temporal checkpoint provenance manifest") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError("temporal checkpoint provenance manifest must be a mapping")
+    feature_names = validate_feature_names(manifest.get("features", ()))
+    raw_counts = manifest.get("feature_counts")
+    if raw_counts != PRODUCT_FEATURE_COUNTS:
+        raise RuntimeError("temporal checkpoint manifest feature counts do not match the product contract")
+    entries = manifest.get("encoder_checkpoints")
+    if not isinstance(entries, dict):
+        raise RuntimeError("temporal checkpoint manifest is missing encoder_checkpoints")
+    matches = [
+        entry
+        for entry in entries.values()
+        if isinstance(entry, dict)
+        and Path(str(entry.get("path", ""))).name == checkpoint_path.name
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("temporal checkpoint is not uniquely listed in its provenance manifest")
+    digest = str(matches[0].get("sha256", "")).lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise RuntimeError("temporal checkpoint manifest has an invalid sha256 digest")
+    return feature_names, digest
 
 
 @dataclass(frozen=True)
@@ -213,15 +309,31 @@ class TemporalEncoder:
         return result / norm
 
     @classmethod
-    def from_checkpoint(cls, path: Path, *, device: str = "cpu") -> "TemporalEncoder":
+    def from_checkpoint(
+        cls,
+        path: Path,
+        *,
+        device: str = "cpu",
+        product_contract: bool = True,
+    ) -> "TemporalEncoder":
         import torch
 
         checkpoint_path = path.expanduser().resolve()
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"Missing temporal encoder checkpoint: {checkpoint_path}")
+        digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        manifest_features: tuple[str, ...] | None = None
+        if product_contract:
+            manifest_features, manifest_digest = _load_product_manifest(checkpoint_path)
+            if manifest_digest != digest:
+                raise RuntimeError("temporal checkpoint digest does not match its provenance manifest")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if not isinstance(checkpoint, dict):
             raise RuntimeError("temporal encoder checkpoint must be a mapping")
+        if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"unsupported temporal encoder checkpoint schema: {checkpoint.get('schema_version')!r}"
+            )
         raw_spec = checkpoint.get("encoder_spec")
         if not isinstance(raw_spec, dict):
             raise RuntimeError("checkpoint is missing encoder_spec")
@@ -234,11 +346,35 @@ class TemporalEncoder:
             dropout=float(raw_spec.get("dropout", 0.0)),
             embedding_dim=int(raw_spec.get("embedding_dim", 64)),
         )
+        if product_contract:
+            _validate_product_spec(spec)
+            if manifest_features != spec.feature_names:
+                raise RuntimeError("temporal checkpoint feature order does not match its provenance manifest")
+            metadata = checkpoint.get("metadata")
+            if not isinstance(metadata, dict) or not metadata:
+                raise RuntimeError("temporal checkpoint is missing training provenance metadata")
+            required_provenance = {
+                "held_out_participant",
+                "train_participants",
+                "best_epoch",
+                "normalization",
+            }
+            missing_provenance = sorted(required_provenance - set(metadata))
+            if missing_provenance:
+                raise RuntimeError(
+                    f"temporal checkpoint provenance is missing: {missing_provenance[0]}"
+                )
         model = build_torch_encoder(spec).to(device)
-        state = checkpoint.get("encoder_state_dict") or checkpoint.get("model_state_dict") or checkpoint.get("state_dict")
+        state = checkpoint.get("encoder_state_dict")
+        if not product_contract and not isinstance(state, dict):
+            state = checkpoint.get("model_state_dict") or checkpoint.get("state_dict")
         if not isinstance(state, dict):
             raise RuntimeError("checkpoint is missing an encoder state_dict")
         model_state = model.state_dict()
+        if product_contract:
+            unexpected = sorted(set(state) - set(model_state))
+            if unexpected:
+                raise RuntimeError(f"checkpoint contains unexpected encoder weights: {unexpected[0]}")
         compatible = {key: value for key, value in state.items() if key in model_state and model_state[key].shape == value.shape}
         missing_tcn = sorted(key for key in model_state if key.startswith("tcn.") and key not in compatible)
         if missing_tcn:
@@ -253,7 +389,11 @@ class TemporalEncoder:
                 tensor = torch.as_tensor(batch, dtype=torch.float32, device=device)
                 return model(tensor).detach().cpu().numpy()
 
-        digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        if (
+            checkpoint.get("normalization_mean") is None
+            or checkpoint.get("normalization_std") is None
+        ):
+            raise RuntimeError("checkpoint is missing required normalization statistics")
         return cls(
             spec=spec,
             encode_batch=encode_batch,

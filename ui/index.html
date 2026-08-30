@@ -25,7 +25,7 @@
       <div class="sidebar-bottom">
         <div class="privacy-note">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2m-11 0h12v10H6z"/></svg>
-          <div><strong>로컬 우선</strong><span>원격 동기화 없이 현재 Mac에 저장됩니다.</span></div>
+          <div><strong>로컬 우선</strong><span>원격 동기화 없이 현재 실행 기기에 저장됩니다.</span></div>
         </div>
       </div>
     </aside>
@@ -194,7 +194,7 @@
                 <label>선택적 음성 존재 메모<input name="audio_presence_note" placeholder="예: 짧은 발성이 들렸음"></label>
                 <button class="button button-primary" type="submit">데모 관찰 초안 만들기</button>
               </form>
-              <p class="camera-note">실제 카메라 미리보기는 터미널의 <code>scripts/ondamm_sensing.sh</code> 경로를 유지합니다.</p>
+              <p class="camera-note">huro headless 데모는 <code>--debug-preview</code>를 켠 뒤 SSH tunnel의 <code>http://127.0.0.1:8766</code>에서 확인합니다. 카메라는 runtime 한 프로세스만 엽니다.</p>
             </article>
             <article class="card sensing-result" id="sensing-result">
               <div class="preview-placeholder"><span class="draft-stamp">초안</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>
