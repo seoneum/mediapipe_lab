@@ -68,6 +68,23 @@ class MicroMotionRuntime:
         self._features: deque[np.ndarray] = deque(maxlen=encoder.spec.sequence_length)
         self._frame_index = 0
 
+    @property
+    def temporal_history_count(self) -> int:
+        return len(self._features)
+
+    def reset_temporal_history(self) -> None:
+        """Cancel an incomplete episode and require a fresh full causal window."""
+        self._features.clear()
+        self._frame_index = 0
+        self.episode_detector.reset()
+
+    def add_frame_only(self, *, timestamp: float, frame: np.ndarray | None = None) -> RuntimeOutcome:
+        """Keep ephemeral clip tails moving without manufacturing TCN features."""
+        if frame is not None:
+            self.clip_recorder.add_frame(frame=frame, timestamp=float(timestamp))
+        finalized = self._finalize_ready(float(timestamp))
+        return RuntimeOutcome(None, None, None, tuple(event.to_dict() for event in finalized))
+
     def add_observation(
         self,
         *,
@@ -154,6 +171,7 @@ class MicroMotionRuntime:
             not decision.clip_required
             or not decision.candidate_id
             or not self.clip_recorder.persist_enabled
+            or self.clip_recorder.has_pending_candidate(decision.candidate_id)
         ):
             return decision, None
         event = EventMetadata.create(

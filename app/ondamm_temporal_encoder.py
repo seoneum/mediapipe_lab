@@ -353,17 +353,35 @@ class TemporalEncoder:
             metadata = checkpoint.get("metadata")
             if not isinstance(metadata, dict) or not metadata:
                 raise RuntimeError("temporal checkpoint is missing training provenance metadata")
-            required_provenance = {
-                "held_out_participant",
-                "train_participants",
-                "best_epoch",
-                "normalization",
-            }
+            required_provenance = {"train_participants", "best_epoch", "normalization"}
             missing_provenance = sorted(required_provenance - set(metadata))
             if missing_provenance:
                 raise RuntimeError(
                     f"temporal checkpoint provenance is missing: {missing_provenance[0]}"
                 )
+            role = str(metadata.get("checkpoint_role", "research-loso"))
+            if role == "product":
+                if not metadata.get("development_participants"):
+                    raise RuntimeError("product temporal checkpoint is missing development participants")
+            elif role == "child-personalized":
+                if not metadata.get("child_id"):
+                    raise RuntimeError("child-personalized checkpoint is missing child_id")
+                training_sessions = metadata.get("training_sessions")
+                if not isinstance(training_sessions, list) or not training_sessions:
+                    raise RuntimeError(
+                        "child-personalized checkpoint is missing training sessions"
+                    )
+                future_session = metadata.get("future_session_excluded_from_training")
+                if not future_session:
+                    raise RuntimeError(
+                        "child-personalized checkpoint is missing held-out future session"
+                    )
+                if future_session in training_sessions:
+                    raise RuntimeError(
+                        "child-personalized checkpoint leaked its future session into training"
+                    )
+            elif not metadata.get("held_out_participant"):
+                raise RuntimeError("research temporal checkpoint is missing held_out_participant")
         model = build_torch_encoder(spec).to(device)
         state = checkpoint.get("encoder_state_dict")
         if not product_contract and not isinstance(state, dict):

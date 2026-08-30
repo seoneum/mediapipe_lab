@@ -58,7 +58,7 @@ def _digest_vector(vector: np.ndarray) -> str:
 @dataclass(frozen=True)
 class PatternMemoryPolicy:
     known_distance_threshold: float = 0.25
-    candidate_distance_threshold: float = 0.20
+    candidate_distance_threshold: float = 0.05
     suppression_distance_threshold: float = 0.15
     min_occurrences_for_clip: int = 3
     strong_candidate_occurrences: int = 5
@@ -155,7 +155,7 @@ class PatternMemoryStore:
             embedding_dimension=int(metadata.get("embedding_dimension", 0)),
             policy=PatternMemoryPolicy(
                 known_distance_threshold=float(raw_policy.get("known_distance_threshold", 0.25)),
-                candidate_distance_threshold=float(raw_policy.get("candidate_distance_threshold", 0.20)),
+                candidate_distance_threshold=float(raw_policy.get("candidate_distance_threshold", 0.05)),
                 suppression_distance_threshold=float(raw_policy.get("suppression_distance_threshold", 0.15)),
                 min_occurrences_for_clip=int(raw_policy.get("min_occurrences_for_clip", 3)),
                 strong_candidate_occurrences=int(raw_policy.get("strong_candidate_occurrences", 5)),
@@ -184,24 +184,6 @@ class PatternMemoryStore:
             if previous:
                 return PatternDecision(**previous)
 
-            suppressed = self._nearest(metadata["suppressed"], vectors, vector)
-            if suppressed and suppressed[1] <= self.policy.suppression_distance_threshold:
-                item, distance = suppressed
-                decision = PatternDecision(
-                    lifecycle="SUPPRESSED",
-                    episode_id=episode_id,
-                    pattern_id=None,
-                    candidate_id=item["suppression_id"],
-                    occurrence_count=int(item.get("match_count", 0)) + 1,
-                    distance=round(distance, 6),
-                    novelty_score=round(distance, 6),
-                    clip_required=False,
-                    strong_candidate=False,
-                )
-                item["match_count"] = decision.occurrence_count
-                item["last_seen"] = utc_now()
-                return self._remember_decision(metadata, vectors, decision)
-
             known = self._nearest(metadata["known_patterns"], vectors, vector)
             if known and known[1] <= float(known[0].get("distance_threshold", self.policy.known_distance_threshold)):
                 item, distance = known
@@ -220,6 +202,26 @@ class PatternMemoryStore:
                     nearest_known_pattern=item["pattern_id"],
                     nearest_known_distance=round(distance, 6),
                 )
+                return self._remember_decision(metadata, vectors, decision)
+
+            suppressed = self._nearest(metadata["suppressed"], vectors, vector)
+            if suppressed and suppressed[1] <= self.policy.suppression_distance_threshold:
+                item, distance = suppressed
+                decision = PatternDecision(
+                    lifecycle="SUPPRESSED",
+                    episode_id=episode_id,
+                    pattern_id=None,
+                    candidate_id=item["suppression_id"],
+                    occurrence_count=int(item.get("match_count", 0)) + 1,
+                    distance=round(distance, 6),
+                    novelty_score=round(distance, 6),
+                    clip_required=False,
+                    strong_candidate=False,
+                    nearest_known_pattern=known[0]["pattern_id"] if known else None,
+                    nearest_known_distance=round(known[1], 6) if known else None,
+                )
+                item["match_count"] = decision.occurrence_count
+                item["last_seen"] = utc_now()
                 return self._remember_decision(metadata, vectors, decision)
 
             nearest_known_distance = known[1] if known else 1.0
@@ -292,7 +294,10 @@ class PatternMemoryStore:
                 metadata["candidates"].append(item)
 
             count = int(item["occurrence_count"])
-            clip_required = count == self.policy.min_occurrences_for_clip
+            clip_required = (
+                count >= self.policy.min_occurrences_for_clip
+                and not item.get("source_event_ids")
+            )
             lifecycle = "REPEATING_CANDIDATE" if count >= self.policy.min_occurrences_for_clip else "UNKNOWN_OCCURRENCE"
             decision = PatternDecision(
                 lifecycle=lifecycle,

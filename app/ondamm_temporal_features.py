@@ -139,25 +139,50 @@ class PersonalMotionCalibrator:
     """Short neutral calibration that converts raw motion into a personal z score."""
 
     calibration_seconds: float = 3.0
+    minimum_valid_samples: int = 60
+    minimum_face_coverage: float = 0.80
+    minimum_effective_duration: float = 2.5
     scale_floor: float = 1e-5
     max_score: float = 20.0
     _started_at: float | None = None
     _samples: list[float] = field(default_factory=list)
+    _observation_count: int = 0
+    _effective_duration: float = 0.0
+    _last_timestamp: float | None = None
+    _last_face_detected: bool = False
     center: float = 0.0
     scale: float = 1.0
     ready: bool = False
+
+    def __post_init__(self) -> None:
+        if self.calibration_seconds < 0:
+            raise ValueError("calibration_seconds must be non-negative")
+        if self.minimum_valid_samples <= 0:
+            raise ValueError("minimum_valid_samples must be positive")
+        if not 0 < self.minimum_face_coverage <= 1:
+            raise ValueError("minimum_face_coverage must be in (0, 1]")
+        if self.minimum_effective_duration < 0:
+            raise ValueError("minimum_effective_duration must be non-negative")
 
     def add(self, *, timestamp: float, raw_motion: float, face_detected: bool) -> float:
         timestamp = float(timestamp)
         raw_motion = max(0.0, _finite(raw_motion))
         if self._started_at is None:
-            if not face_detected:
-                return 0.0
             self._started_at = timestamp
         if not self.ready:
+            self._observation_count += 1
             if face_detected:
                 self._samples.append(raw_motion)
-            if timestamp - self._started_at + 1e-9 >= self.calibration_seconds:
+            if (
+                face_detected
+                and self._last_face_detected
+                and self._last_timestamp is not None
+                and timestamp >= self._last_timestamp
+            ):
+                self._effective_duration += timestamp - self._last_timestamp
+            self._last_timestamp = timestamp
+            self._last_face_detected = bool(face_detected)
+            if self._requirements_met(timestamp):
                 self._finish()
             return 0.0
         return float(np.clip((raw_motion - self.center) / self.scale, 0.0, self.max_score))
@@ -167,7 +192,53 @@ class PersonalMotionCalibrator:
             return 0.0
         if self._started_at is None:
             return self.calibration_seconds
-        return max(0.0, self.calibration_seconds - (float(timestamp) - self._started_at))
+        wall_remaining = max(0.0, self.calibration_seconds - (float(timestamp) - self._started_at))
+        effective_remaining = max(0.0, self.minimum_effective_duration - self._effective_duration)
+        return max(wall_remaining, effective_remaining)
+
+    @property
+    def valid_sample_count(self) -> int:
+        return len(self._samples)
+
+    @property
+    def face_coverage(self) -> float:
+        return self.valid_sample_count / self._observation_count if self._observation_count else 0.0
+
+    @property
+    def effective_duration(self) -> float:
+        return self._effective_duration
+
+    def status(self, timestamp: float) -> dict[str, Any]:
+        elapsed = 0.0 if self._started_at is None else max(0.0, float(timestamp) - self._started_at)
+        missing: list[str] = []
+        if elapsed + 1e-9 < self.calibration_seconds:
+            missing.append("minimum wall duration")
+        if self.valid_sample_count < self.minimum_valid_samples:
+            missing.append("valid face samples")
+        if self.face_coverage + 1e-9 < self.minimum_face_coverage:
+            missing.append("face coverage")
+        if self.effective_duration + 1e-9 < self.minimum_effective_duration:
+            missing.append("effective face duration")
+        return {
+            "ready": self.ready,
+            "valid_samples": self.valid_sample_count,
+            "minimum_valid_samples": self.minimum_valid_samples,
+            "face_coverage": self.face_coverage,
+            "minimum_face_coverage": self.minimum_face_coverage,
+            "effective_duration": self.effective_duration,
+            "minimum_effective_duration": self.minimum_effective_duration,
+            "missing_requirements": missing,
+        }
+
+    def _requirements_met(self, timestamp: float) -> bool:
+        if self._started_at is None:
+            return False
+        return (
+            timestamp - self._started_at + 1e-9 >= self.calibration_seconds
+            and self.valid_sample_count >= self.minimum_valid_samples
+            and self.face_coverage + 1e-9 >= self.minimum_face_coverage
+            and self.effective_duration + 1e-9 >= self.minimum_effective_duration
+        )
 
     def _finish(self) -> None:
         values = np.asarray(self._samples, dtype=np.float32)

@@ -39,6 +39,7 @@ class OndammDebugPreviewTests(unittest.TestCase):
         connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
         try:
             server.publish(np.full((24, 32, 3), 90, dtype=np.uint8))
+            self.assertTrue(server.wait_for_frame())
 
             connection.request("GET", "/health")
             response = connection.getresponse()
@@ -63,6 +64,18 @@ class OndammDebugPreviewTests(unittest.TestCase):
             self.assertTrue(first_bytes.startswith(b"--frame\r\n"))
         finally:
             connection.close()
+            server.stop()
+
+    def test_debug_preview_is_throttled(self) -> None:
+        server = DebugPreviewServer(port=0, max_fps=10.0)
+        server.start()
+        try:
+            frame = np.zeros((24, 32, 3), dtype=np.uint8)
+            self.assertTrue(server.publish(frame))
+            self.assertFalse(server.publish(frame))
+            self.assertEqual(server.accepted_frame_count, 1)
+            self.assertTrue(server.wait_for_frame())
+        finally:
             server.stop()
 
 

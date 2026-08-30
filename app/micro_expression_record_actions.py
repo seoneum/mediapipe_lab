@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -128,6 +129,20 @@ LOWER_ACTIONS = [
         ),
     ),
 ]
+
+
+ACTION_LABELS_KO = {
+    "brows_raise": "양쪽 눈썹을 자연스럽게 올리기",
+    "brows_frown": "눈썹을 살짝 아래·안쪽으로 모으기",
+    "eyes_squint": "눈을 감지 않고 자연스럽게 가늘게 뜨기",
+    "eyes_wide": "양쪽 눈을 자연스럽게 크게 뜨기",
+    "smile": "작고 자연스럽게 미소 짓기",
+    "mouth_frown": "입꼬리를 자연스럽게 아래로 내리기",
+    "lip_press": "입술을 부드럽게 다물어 누르기",
+    "lip_pucker": "입술을 자연스럽게 오므리기",
+    "jaw_open": "턱을 내려 입을 자연스럽게 벌리기",
+    "nose_wrinkle": "코를 자연스럽게 찡그리기",
+}
 
 
 def get_actions(protocol: str):
@@ -966,6 +981,53 @@ def draw_phase_overlay(
         frame,
         phase_progress,
     )
+
+    # Large presentation cue. This is drawn only on ``display`` by the caller;
+    # the writer has already received the untouched raw camera frame.
+    from ondamm_demo_overlay import render_large_guidance
+
+    action_ko = ACTION_LABELS_KO.get(phase.action, phase.action)
+    if phase.movement_phase == "pre_neutral":
+        countdown = max(1, min(3, int(math.ceil(remaining))))
+        render_large_guidance(
+            frame,
+            phase="countdown",
+            title=str(countdown),
+            detail=f"다음 동작 · {action_ko}",
+            fallback=str(countdown),
+        )
+    elif phase.movement_phase == "onset":
+        render_large_guidance(
+            frame,
+            phase="move",
+            title="지금 천천히 움직이세요",
+            detail=action_ko,
+            fallback="MOVE SLOWLY NOW",
+        )
+    elif phase.movement_phase == "hold":
+        render_large_guidance(
+            frame,
+            phase="move",
+            title="편하게 유지하세요",
+            detail=action_ko,
+            fallback="HOLD COMFORTABLY",
+        )
+    elif phase.movement_phase == "release":
+        render_large_guidance(
+            frame,
+            phase="neutral",
+            title="천천히 중립으로 돌아오세요",
+            detail="얼굴에 힘을 편하게 풀어 주세요",
+            fallback="RETURN TO NEUTRAL SLOWLY",
+        )
+    else:
+        render_large_guidance(
+            frame,
+            phase="calibrating",
+            title="얼굴을 편하게 유지하세요",
+            detail="머리를 고정하고 가운데 점을 보세요",
+            fallback="RELAX YOUR FACE",
+        )
 
 
 # ============================================================

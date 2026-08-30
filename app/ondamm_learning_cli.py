@@ -58,6 +58,7 @@ class RunCapture:
     clip_directory: str | None
     temporal_enabled: bool = False
     temporal_checkpoint: str | None = None
+    temporal_detection_log: str | None = None
 
 
 def slugify(value: str) -> str:
@@ -98,12 +99,8 @@ def resolve_temporal_checkpoint(value: str | None) -> Path | None:
             raise FileNotFoundError(f"Missing --temporal-checkpoint: {path}")
         return path
     root = Path(__file__).resolve().parents[1] / "outputs" / "micro_expression" / "v4_tcn"
-    candidates = sorted(
-        root.glob("encoder_*.pt"),
-        key=lambda path: (path.stat().st_mtime, path.name),
-        reverse=True,
-    )
-    return candidates[0].resolve() if candidates else None
+    product = root / "encoder_product.pt"
+    return product.resolve() if product.is_file() else None
 
 
 def deterministic_demo_started_at() -> str:
@@ -173,6 +170,7 @@ def serialize_run_summary(summary, capture: RunCapture, output_dir: Path) -> dic
     payload["event_clip_directory"] = capture.clip_directory
     payload["temporal_enabled"] = capture.temporal_enabled
     payload["temporal_checkpoint"] = capture.temporal_checkpoint
+    payload["temporal_detection_log"] = capture.temporal_detection_log
     payload["raw_media_notice"] = RAW_MEDIA_NOTICE
     payload["auto_writeback_notice"] = AUTO_WRITEBACK_NOTICE
     payload["output_dir"] = str(output_dir)
@@ -311,7 +309,7 @@ def run_camera_mode(
 
     from holistic_camera import classify_gaze_direction
     from micro_expression_signals import MicroExpressionSignalExtractor
-    from ondamm_demo_overlay import render_demo_overlay
+    from ondamm_demo_overlay import GuidedDemoCountdown, render_demo_overlay
     from ondamm_facial_movement import analyze_facial_movements, rules_from_approved_profiles
 
     started_at = utc_now()
@@ -321,6 +319,11 @@ def run_camera_mode(
     recorded_events: list[EventMetadata] = []
     dossier = load_dossier(args.child_id)
     movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
+    guidance = (
+        GuidedDemoCountdown(action_label=args.guided_action_label)
+        if args.guided_countdown
+        else None
+    )
     extractor = MicroExpressionSignalExtractor(
         dino_every=args.dino_every,
         enable_dino=args.demo_dino,
@@ -341,6 +344,7 @@ def run_camera_mode(
             host=args.debug_preview_host,
             port=args.debug_preview_port,
             jpeg_quality=args.debug_preview_jpeg_quality,
+            max_fps=args.debug_preview_fps,
             allow_remote_bind=args.allow_remote_debug_preview,
         )
         try:
@@ -403,23 +407,35 @@ def run_camera_mode(
                 }
             )
             status_before["fps"] = fps_ema
+            if guidance is not None:
+                status_before = guidance.decorate(status_before, timestamp=elapsed)
             recorded_frame = (
                 render_demo_overlay(frame, signal, status_before)
                 if args.debug_overlay
                 else frame
             )
-            recorder.add_frame(frame=recorded_frame, timestamp=elapsed)
-            detector_events = detector.add_observation(
-                EventObservation(
-                    timestamp=elapsed,
-                    face_present=face_present,
-                    gaze_zone=gaze_zone,
-                    posture_proxy=posture_proxy,
-                    facial_movement_labels=movement_labels,
+            # Temporal mode owns the sole review/event ring buffer. The legacy
+            # sustained-event recorder remains available only in non-temporal
+            # mode so the same large annotated frame is not retained twice.
+            if temporal_demo is None:
+                recorder.add_frame(frame=recorded_frame, timestamp=elapsed)
+                detector_events = detector.add_observation(
+                    EventObservation(
+                        timestamp=elapsed,
+                        face_present=face_present,
+                        gaze_zone=gaze_zone,
+                        posture_proxy=posture_proxy,
+                        facial_movement_labels=movement_labels,
+                    )
                 )
-            )
-            detected_events.extend(detector_events)
-            recorded_events.extend(record_emitted_events(detector_events=detector_events, recorder=recorder, clip_fps=args.clip_fps))
+                detected_events.extend(detector_events)
+                recorded_events.extend(
+                    record_emitted_events(
+                        detector_events=detector_events,
+                        recorder=recorder,
+                        clip_fps=args.clip_fps,
+                    )
+                )
 
             if temporal_demo is not None:
                 temporal_result = temporal_demo.process(
@@ -439,6 +455,8 @@ def run_camera_mode(
                         else status_before
                     )
                     status_after["fps"] = fps_ema
+                    if guidance is not None:
+                        status_after = guidance.decorate(status_after, timestamp=elapsed)
                     preview = render_demo_overlay(frame, signal, status_after)
                 else:
                     preview = frame.copy()
@@ -480,6 +498,11 @@ def run_camera_mode(
         clip_directory=str(recorder.output_dir) if args.record_events and recorder.output_dir else None,
         temporal_enabled=temporal_demo is not None,
         temporal_checkpoint=str(temporal_demo.checkpoint_path) if temporal_demo is not None else None,
+        temporal_detection_log=(
+            str(temporal_demo.detection_log_path)
+            if temporal_demo is not None and temporal_demo.detection_log_path.is_file()
+            else None
+        ),
     )
 
 
@@ -563,6 +586,7 @@ def build_manifest(*, dossier: Dossier, capture: RunCapture, output_dir: Path, p
         "recorded_event_count": len(capture.recorded_events),
         "temporal_enabled": capture.temporal_enabled,
         "temporal_checkpoint": capture.temporal_checkpoint,
+        "temporal_detection_log": capture.temporal_detection_log,
         "support_boundary_notice": "학습 프로그램/실행 요약은 지원용 기록이며 진단 또는 자동 canonical 기록이 아닙니다.",
         "raw_media_notice": RAW_MEDIA_NOTICE,
         "plan_outputs": {name: str(path) for name, path in plan_paths.items()},
@@ -592,6 +616,17 @@ def main() -> None:
     parser.add_argument("--debug-preview-host", default="127.0.0.1")
     parser.add_argument("--debug-preview-port", type=int, default=8766)
     parser.add_argument("--debug-preview-jpeg-quality", type=int, default=82)
+    parser.add_argument("--debug-preview-fps", type=float, default=10.0)
+    parser.add_argument(
+        "--guided-countdown",
+        action="store_true",
+        help="Show large Korean calibration, 3-2-1, move, and neutral cues in the demo overlay",
+    )
+    parser.add_argument(
+        "--guided-action-label",
+        default="같은 짧은 움직임",
+        help="Observable action text shown by --guided-countdown; this is presentation text, not a class label",
+    )
     parser.add_argument(
         "--allow-remote-debug-preview",
         action="store_true",
@@ -601,19 +636,30 @@ def main() -> None:
     parser.add_argument("--dino-every", type=int, default=3)
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--record-events", action="store_true")
-    parser.add_argument("--temporal-checkpoint", help="Frozen causal TCN encoder checkpoint; newest local encoder_*.pt is auto-selected")
+    parser.add_argument(
+        "--temporal-checkpoint",
+        help="Explicit frozen causal TCN checkpoint; default is only encoder_product.pt",
+    )
     parser.add_argument("--no-temporal", action="store_true", help="Disable temporal pattern discovery even if a checkpoint exists")
     parser.add_argument("--require-temporal", action="store_true", help="Fail instead of falling back when no temporal checkpoint exists")
     parser.add_argument("--pattern-memory-root", default=str(ONDAMM_EXPORTS / "pattern-memory"))
     parser.add_argument("--temporal-calibration-seconds", type=float, default=3.0)
+    parser.add_argument("--temporal-calibration-min-samples", type=int, default=60)
+    parser.add_argument("--temporal-calibration-min-face-coverage", type=float, default=0.80)
+    parser.add_argument("--temporal-calibration-min-effective-seconds", type=float, default=2.5)
+    parser.add_argument("--temporal-face-loss-reset-seconds", type=float, default=0.5)
     parser.add_argument("--temporal-onset-z", type=float, default=4.0)
     parser.add_argument("--temporal-offset-z", type=float, default=2.0)
     parser.add_argument("--temporal-min-episode-seconds", type=float, default=0.2)
     parser.add_argument("--temporal-refractory-seconds", type=float, default=0.5)
     parser.add_argument("--temporal-min-occurrences", type=int, default=3)
     parser.add_argument("--temporal-strong-occurrences", type=int, default=5)
+    parser.add_argument("--temporal-candidate-distance-threshold", type=float, default=0.05)
     parser.add_argument("--temporal-pre-seconds", type=float, default=1.5)
     parser.add_argument("--temporal-post-seconds", type=float, default=1.0)
+    parser.add_argument("--review-width", type=int, default=960)
+    parser.add_argument("--review-height", type=int, default=540)
+    parser.add_argument("--review-buffer-fps", type=float, default=12.0)
     parser.add_argument(
         "--movement-label",
         action="append",
@@ -637,10 +683,22 @@ def main() -> None:
         raise ValueError("--debug-preview-port must be between 1 and 65535")
     if not 30 <= args.debug_preview_jpeg_quality <= 95:
         raise ValueError("--debug-preview-jpeg-quality must be between 30 and 95")
+    if args.debug_preview_fps <= 0:
+        raise ValueError("--debug-preview-fps must be positive")
     if args.allow_remote_debug_preview and not args.debug_preview:
         raise ValueError("--allow-remote-debug-preview requires --debug-preview")
+    if args.guided_countdown and args.headless and not args.debug_preview:
+        raise ValueError("--guided-countdown in headless mode requires --debug-preview")
     if args.temporal_calibration_seconds < 0:
         raise ValueError("--temporal-calibration-seconds must be non-negative")
+    if args.temporal_calibration_min_samples <= 0:
+        raise ValueError("--temporal-calibration-min-samples must be positive")
+    if not 0 < args.temporal_calibration_min_face_coverage <= 1:
+        raise ValueError("--temporal-calibration-min-face-coverage must be in (0, 1]")
+    if args.temporal_calibration_min_effective_seconds < 0:
+        raise ValueError("--temporal-calibration-min-effective-seconds must be non-negative")
+    if args.temporal_face_loss_reset_seconds < 0:
+        raise ValueError("--temporal-face-loss-reset-seconds must be non-negative")
     if args.temporal_onset_z <= 0 or not 0 <= args.temporal_offset_z < args.temporal_onset_z:
         raise ValueError("temporal z thresholds require 0 <= offset < onset")
     if args.temporal_min_episode_seconds <= 0 or args.temporal_refractory_seconds < 0:
@@ -649,8 +707,12 @@ def main() -> None:
         raise ValueError("--temporal-min-occurrences must be at least two")
     if args.temporal_strong_occurrences < args.temporal_min_occurrences:
         raise ValueError("--temporal-strong-occurrences must be >= --temporal-min-occurrences")
+    if not 0 < args.temporal_candidate_distance_threshold <= 2:
+        raise ValueError("--temporal-candidate-distance-threshold must be in (0, 2]")
     if args.temporal_pre_seconds < 0 or args.temporal_post_seconds < 0:
         raise ValueError("temporal clip pre/post seconds must be non-negative")
+    if args.review_width <= 0 or args.review_height <= 0 or args.review_buffer_fps <= 0:
+        raise ValueError("review buffer size/FPS must be positive")
 
     dossier = load_dossier(args.child_id)
     if not args.demo:
@@ -698,21 +760,29 @@ def main() -> None:
 
             temporal_demo = LiveTemporalDemo(
                 child_id=dossier.child_id,
+                session_id=output_dir.name,
                 checkpoint_path=checkpoint,
                 pattern_memory_root=Path(args.pattern_memory_root),
                 clips_dir=clips_dir,
                 event_metadata_path=output_dir / "event_recording.json",
                 record_events=args.record_events,
-                clip_fps=args.clip_fps,
+                clip_fps=args.review_buffer_fps,
                 calibration_seconds=args.temporal_calibration_seconds,
+                calibration_min_valid_samples=args.temporal_calibration_min_samples,
+                calibration_min_face_coverage=args.temporal_calibration_min_face_coverage,
+                calibration_min_effective_seconds=args.temporal_calibration_min_effective_seconds,
+                face_loss_reset_seconds=args.temporal_face_loss_reset_seconds,
                 onset_z=args.temporal_onset_z,
                 offset_z=args.temporal_offset_z,
                 min_episode_seconds=args.temporal_min_episode_seconds,
                 refractory_seconds=args.temporal_refractory_seconds,
                 min_occurrences_for_clip=args.temporal_min_occurrences,
                 strong_candidate_occurrences=args.temporal_strong_occurrences,
+                candidate_distance_threshold=args.temporal_candidate_distance_threshold,
                 pre_seconds=args.temporal_pre_seconds,
                 post_seconds=args.temporal_post_seconds,
+                review_frame_size=(args.review_width, args.review_height),
+                review_buffer_fps=args.review_buffer_fps,
             )
             print(f"temporal_checkpoint: {checkpoint}")
             print(f"pattern_memory: {Path(args.pattern_memory_root).expanduser().resolve() / dossier.child_id}")

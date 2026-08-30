@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -231,6 +232,38 @@ class TemporalPatternTests(unittest.TestCase):
         self.assertEqual(len([episode for episode in episodes if episode is not None]), 3)
         self.assertEqual(len({episode.episode_id for episode in episodes}), 3)
 
+    def test_face_loss_resets_temporal_history(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-face-loss-") as temp_dir:
+            runtime, _, _, frame, features = build_runtime_fixture(Path(temp_dir))
+            self.assertEqual(runtime.temporal_history_count, 3)
+            runtime.add_observation(
+                timestamp=0.3, features=features, frame=frame, motion_score=0.3
+            )
+            runtime.reset_temporal_history()
+            self.assertEqual(runtime.temporal_history_count, 0)
+            self.assertIsNone(runtime.episode_detector.flush(timestamp=0.4))
+
+    def test_reacquisition_requires_warmup(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-face-reacquire-") as temp_dir:
+            runtime, _, _, frame, features = build_runtime_fixture(Path(temp_dir))
+            runtime.reset_temporal_history()
+            first = runtime.add_observation(
+                timestamp=1.0, features=features, frame=frame, motion_score=0.5
+            )
+            second = runtime.add_observation(
+                timestamp=1.1, features=features, frame=frame, motion_score=0.5
+            )
+            self.assertIsNone(first.episode)
+            self.assertIsNone(second.episode)
+            self.assertEqual(runtime.temporal_history_count, 2)
+
+    def test_headless_runtime_still_operates(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-headless-runtime-") as temp_dir:
+            runtime, _, _, frame, features = build_runtime_fixture(Path(temp_dir))
+            outcome = emit_episode(runtime, start=1.0, frame=frame, features=features)
+            self.assertEqual(outcome.decision["lifecycle"], "UNKNOWN_OCCURRENCE")
+            self.assertEqual(outcome.decision["occurrence_count"], 1)
+
     def test_missing_checkpoint_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-missing-encoder-") as temp_dir:
             with self.assertRaises(FileNotFoundError):
@@ -339,6 +372,56 @@ class TemporalPatternTests(unittest.TestCase):
             self.assertFalse(suppressed.clip_required)
             self.assertEqual(store.public_state()["candidates"], [])
 
+    def test_known_match_precedes_suppression(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-known-suppression-") as temp_dir:
+            store = PatternMemoryStore(
+                Path(temp_dir),
+                child_id="child-a",
+                encoder_digest=ENCODER_DIGEST,
+                embedding_dimension=4,
+            )
+            known_vector = [1.0, 0.0, 0.0, 0.0]
+            source = [
+                store.observe_episode(
+                    episode_id=f"episode-known-source-{index}",
+                    embedding=known_vector,
+                    start_timestamp=float(index),
+                    end_timestamp=float(index) + 0.4,
+                    quality_score=0.9,
+                )
+                for index in range(3)
+            ]
+            store.attach_source_event(candidate_id=source[-1].candidate_id, event_id="event-known")
+            pattern = store.promote_candidate(
+                candidate_id=source[-1].candidate_id,
+                display_name="known",
+                approved_by="reviewer",
+                source_event_ids=["event-known"],
+                distance_threshold=0.05,
+            )
+            nearby = [0.9, np.sqrt(0.19), 0.0, 0.0]
+            rejected = store.observe_episode(
+                episode_id="episode-rejected",
+                embedding=nearby,
+                start_timestamp=5.0,
+                end_timestamp=5.4,
+                quality_score=0.9,
+            )
+            store.suppress_candidate(
+                candidate_id=rejected.candidate_id,
+                approved_by="reviewer",
+                reason="rejected nearby pattern",
+            )
+            decision = store.observe_episode(
+                episode_id="episode-known-query",
+                embedding=known_vector,
+                start_timestamp=6.0,
+                end_timestamp=6.4,
+                quality_score=0.9,
+            )
+            self.assertEqual(decision.lifecycle, "KNOWN_OCCURRENCE")
+            self.assertEqual(decision.pattern_id, pattern["pattern_id"])
+
     def test_known_pattern_does_not_create_unknown_cluster(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-known-pattern-") as temp_dir:
             store = PatternMemoryStore(
@@ -407,6 +490,41 @@ class TemporalPatternTests(unittest.TestCase):
             self.assertEqual(list(Path(temp_dir).rglob("*.mp4")), [])
             candidate = memory.public_state()["candidates"][0]
             self.assertEqual(candidate["source_event_ids"], [])
+
+    def test_third_clip_failure_retries_on_fourth_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-clip-retry-") as temp_dir:
+            runtime, recorder, _, frame, features = build_runtime_fixture(Path(temp_dir))
+            for start in (1.0, 2.0, 3.0):
+                emit_episode(runtime, start=start, frame=frame, features=features)
+            with patch.object(recorder, "_persist_event", side_effect=RuntimeError("codec failed")):
+                with self.assertRaisesRegex(RuntimeError, "codec failed"):
+                    runtime.add_observation(
+                        timestamp=4.2,
+                        features=features,
+                        frame=frame,
+                        motion_score=0.0,
+                    )
+            self.assertEqual(recorder.pending_event_count, 0)
+            fourth = emit_episode(runtime, start=5.0, frame=frame, features=features)
+            self.assertEqual(fourth.decision["occurrence_count"], 4)
+            self.assertIsNotNone(fourth.requested_event)
+            self.assertEqual(recorder.pending_event_count, 1)
+
+    def test_duplicate_clip_is_not_created(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-no-duplicate-clip-") as temp_dir:
+            runtime, _, memory, frame, features = build_runtime_fixture(
+                Path(temp_dir), output_format="npz"
+            )
+            for start in (1.0, 2.0, 3.0):
+                emit_episode(runtime, start=start, frame=frame, features=features)
+            final = runtime.add_observation(
+                timestamp=4.2, features=features, frame=frame, motion_score=0.0
+            )
+            self.assertEqual(len(final.finalized_events), 1)
+            fourth = emit_episode(runtime, start=5.0, frame=frame, features=features)
+            self.assertIsNone(fourth.requested_event)
+            self.assertEqual(len(list(Path(temp_dir).rglob("*.npz"))), 2)  # vectors.npz + one clip
+            self.assertEqual(len(memory.public_state()["candidates"][0]["source_event_ids"]), 1)
 
     def test_clip_waits_for_post_tail(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-post-tail-") as temp_dir:

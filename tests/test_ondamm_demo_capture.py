@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -13,7 +14,11 @@ APP_DIR = ROOT / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from ondamm_demo_overlay import render_demo_overlay  # noqa: E402
+from ondamm_demo_overlay import (  # noqa: E402
+    GuidanceTiming,
+    GuidedDemoCountdown,
+    render_demo_overlay,
+)
 from ondamm_live_temporal_demo import LiveTemporalDemo  # noqa: E402
 from ondamm_temporal_encoder import (  # noqa: E402
     TemporalEncoderSpec,
@@ -57,11 +62,46 @@ class OndammDemoCaptureTests(unittest.TestCase):
         self.assertGreater(values["geom_abs_mouth_width"], 0.0)
 
     def test_personal_motion_calibration_separates_neutral_and_motion(self) -> None:
-        calibrator = PersonalMotionCalibrator(calibration_seconds=0.2, scale_floor=0.001)
+        calibrator = PersonalMotionCalibrator(
+            calibration_seconds=0.2,
+            minimum_valid_samples=2,
+            minimum_face_coverage=1.0,
+            minimum_effective_duration=0.2,
+            scale_floor=0.001,
+        )
         self.assertEqual(calibrator.add(timestamp=0.0, raw_motion=0.001, face_detected=True), 0.0)
         self.assertEqual(calibrator.add(timestamp=0.2, raw_motion=0.001, face_detected=True), 0.0)
         self.assertTrue(calibrator.ready)
         self.assertGreater(calibrator.add(timestamp=0.3, raw_motion=0.02, face_detected=True), 4.0)
+
+    def test_calibration_requires_minimum_valid_samples(self) -> None:
+        calibrator = PersonalMotionCalibrator(
+            calibration_seconds=0.2,
+            minimum_valid_samples=3,
+            minimum_face_coverage=0.5,
+            minimum_effective_duration=0.2,
+        )
+        calibrator.add(timestamp=0.0, raw_motion=0.001, face_detected=True)
+        calibrator.add(timestamp=0.2, raw_motion=0.001, face_detected=True)
+        self.assertFalse(calibrator.ready)
+        self.assertIn("valid face samples", calibrator.status(0.2)["missing_requirements"])
+        calibrator.add(timestamp=0.3, raw_motion=0.001, face_detected=True)
+        self.assertTrue(calibrator.ready)
+
+    def test_calibration_requires_face_coverage(self) -> None:
+        calibrator = PersonalMotionCalibrator(
+            calibration_seconds=0.2,
+            minimum_valid_samples=2,
+            minimum_face_coverage=0.75,
+            minimum_effective_duration=0.1,
+        )
+        calibrator.add(timestamp=0.0, raw_motion=0.0, face_detected=False)
+        calibrator.add(timestamp=0.1, raw_motion=0.001, face_detected=True)
+        calibrator.add(timestamp=0.2, raw_motion=0.001, face_detected=True)
+        self.assertFalse(calibrator.ready)
+        self.assertIn("face coverage", calibrator.status(0.2)["missing_requirements"])
+        calibrator.add(timestamp=0.3, raw_motion=0.001, face_detected=True)
+        self.assertTrue(calibrator.ready)
 
     def test_overlay_draws_landmarks_and_demo_state_without_resizing(self) -> None:
         frame = np.zeros((480, 720, 3), dtype=np.uint8)
@@ -83,6 +123,65 @@ class OndammDemoCaptureTests(unittest.TestCase):
         self.assertEqual(rendered.shape, frame.shape)
         self.assertGreater(int(rendered.sum()), 0)
         self.assertEqual(int(frame.sum()), 0)
+
+    def test_guided_countdown_shows_large_three_two_one_move_and_neutral_cues(self) -> None:
+        guidance = GuidedDemoCountdown(
+            GuidanceTiming(
+                stable_seconds=1.0,
+                announcement_seconds=0.8,
+                countdown_seconds=3,
+                move_seconds=1.0,
+                neutral_seconds=2.0,
+                repeats=3,
+            )
+        )
+        ready = {
+            "calibration_ready": True,
+            "face_lost": False,
+            "warming_up": False,
+            "motion_active": False,
+        }
+
+        self.assertEqual(guidance.decorate(ready, timestamp=0.0)["guidance_phase"], "settling")
+        self.assertEqual(guidance.decorate(ready, timestamp=1.0)["guidance_phase"], "announcement")
+        self.assertEqual(guidance.decorate(ready, timestamp=1.81)["guidance_title"], "3")
+        self.assertEqual(guidance.decorate(ready, timestamp=2.81)["guidance_title"], "2")
+        self.assertEqual(guidance.decorate(ready, timestamp=3.81)["guidance_title"], "1")
+        self.assertEqual(guidance.decorate(ready, timestamp=4.81)["guidance_phase"], "move")
+        self.assertEqual(guidance.decorate(ready, timestamp=5.81)["guidance_phase"], "neutral")
+        self.assertEqual(guidance.decorate(ready, timestamp=7.81)["guidance_cycle"], 2)
+
+    def test_guided_countdown_resets_when_face_is_lost(self) -> None:
+        guidance = GuidedDemoCountdown(GuidanceTiming(stable_seconds=0.1))
+        ready = {
+            "calibration_ready": True,
+            "face_lost": False,
+            "warming_up": False,
+            "motion_active": False,
+        }
+        guidance.decorate(ready, timestamp=0.0)
+        self.assertEqual(guidance.decorate(ready, timestamp=0.2)["guidance_phase"], "announcement")
+        lost = dict(ready, face_lost=True)
+        self.assertEqual(guidance.decorate(lost, timestamp=0.3)["guidance_phase"], "face_lost")
+        self.assertEqual(guidance.decorate(ready, timestamp=0.4)["guidance_phase"], "settling")
+
+    def test_large_guidance_is_visualization_only(self) -> None:
+        frame = np.zeros((480, 720, 3), dtype=np.uint8)
+        rendered = render_demo_overlay(
+            frame,
+            demo_signal(),
+            {
+                "temporal_enabled": True,
+                "calibration_ready": True,
+                "guidance_phase": "countdown",
+                "guidance_title": "3",
+                "guidance_fallback": "3",
+                "guidance_detail": "첫 번째 동작 준비",
+            },
+        )
+
+        self.assertEqual(int(frame.sum()), 0)
+        self.assertGreater(int(rendered[-180:].sum()), 0)
 
     def test_live_demo_saves_only_third_independent_episode_with_overlay_clip(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-live-demo-") as temp_dir:
@@ -137,6 +236,7 @@ class OndammDemoCaptureTests(unittest.TestCase):
             )
             demo = LiveTemporalDemo(
                 child_id="demo-child",
+                session_id="future-session-03",
                 checkpoint_path=checkpoint,
                 pattern_memory_root=root / "pattern-memory",
                 clips_dir=root / "clips",
@@ -182,6 +282,14 @@ class OndammDemoCaptureTests(unittest.TestCase):
             state = demo.overlay_status(timestamp=12.5)
             self.assertTrue(state["event_saved"])
             self.assertEqual(state["occurrence_count"], 3)
+            with demo.detection_log_path.open("r", encoding="utf-8", newline="") as handle:
+                detection_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(detection_rows), 3)
+            self.assertTrue(all(row["child_id"] == "demo-child" for row in detection_rows))
+            self.assertTrue(
+                all(row["session_id"] == "future-session-03" for row in detection_rows)
+            )
+            self.assertEqual(detection_rows[-1]["lifecycle"], "REPEATING_CANDIDATE")
 
 
 if __name__ == "__main__":

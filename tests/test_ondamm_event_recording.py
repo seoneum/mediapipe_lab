@@ -169,6 +169,32 @@ class OnDammEventRecordingTests(unittest.TestCase):
         recorded_event = recorder.record_event(event)
         self.assertIsNone(recorded_event.clip_path)
 
+    def test_review_buffer_is_downscaled_and_throttled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-review-buffer-") as temp_dir:
+            recorder = LocalEventClipRecorder(
+                policy=EventRecordingPolicy(pre_event_buffer_seconds=1.0),
+                output_dir=Path(temp_dir),
+                buffer_enabled=True,
+                persist_enabled=True,
+                output_format="npz",
+                buffer_frame_size=(64, 36),
+                buffer_fps=10.0,
+            )
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+            recorder.add_frame(frame=frame, timestamp=0.0)
+            recorder.add_frame(frame=frame, timestamp=0.05)
+            recorder.add_frame(frame=frame, timestamp=0.1)
+            event = EventMetadata.create(
+                event_type="facial_movement_detected",
+                start_timestamp=0.0,
+                end_timestamp=0.1,
+                trigger_values={"duration_seconds": 0.1},
+            )
+            recorded = recorder.record_event(event)
+            with np.load(recorded.clip_path, allow_pickle=False) as archive:
+                self.assertEqual(archive["frames"].shape, (2, 36, 64, 3))
+                self.assertEqual(archive["timestamps"].tolist(), [0.0, 0.1])
+
     def test_child_stop_discards_ram_frames_and_pending_clip(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ondamm-stop-") as temp_dir:
             recorder = LocalEventClipRecorder(

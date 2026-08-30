@@ -110,6 +110,8 @@ DINOv3 ViT-S/16은 gated 모델이어서 저장소에 포함하지 않습니다.
 
 ## 미세 움직임 학습 설계
 
+> **제품 목표:** cross-person generalization이 아니라 특정 target child 한 명에 대한 강한 temporal personalization이다. P1/P2/P3는 representation 개발·디버깅·pretrained initialization·embedding sanity check에만 사용한다. P4 수집이나 LOSO 확대는 제품 경로에 포함하지 않으며, 최종 평가는 같은 아동의 과거 세션으로 학습한 뒤 held-out future session에서 수행한다. 세부 계약과 최종 지표는 [`docs/ON DAMM 아동별 temporal 개인화 계약.md`](docs/ON%20DAMM%20아동별%20temporal%20개인화%20계약.md)에 정리되어 있다.
+
 연구 경로에는 person-held-out causal TCN이, ON DAMM 제품 경로에는 frozen encoder를 이용한 개인별 temporal pattern memory가 구현되어 있습니다. 첫 제품 encoder는 DINO나 시선·머리 자세 같은 nuisance 신호를 섞지 않고 다음 79개 label-free feature만 받습니다.
 
 ```text
@@ -120,17 +122,27 @@ DINOv3 ViT-S/16은 gated 모델이어서 저장소에 포함하지 않습니다.
 79 features × 60 frames(약 2초) → causal TCN → 64-D L2 embedding
 ```
 
-`scripts/train_v4_tcn.py`는 각 held-out fold의 학습 완료 시 분류 head를 제외한 `tcn.*` 가중치, feature 순서, robust normalization 통계, split provenance를 제품용 checkpoint로 내보냅니다.
+`scripts/train_v4_tcn.py`는 연구 평가용 LOSO checkpoint를 만듭니다. 제품 runtime에는 이 파일을 자동 선택하지 않습니다. Repeat-held-out validation으로 epoch 수를 고른 뒤 p1+p2+p3 전체 development sequence로 다시 학습하는 별도 product export를 사용합니다.
 
 ```bash
 .venv/bin/python scripts/train_v4_tcn.py
+.venv/bin/python scripts/train_product_encoder.py --device mps
 
-# 예: outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
+# 연구 평가: outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
+# 제품 runtime: outputs/micro_expression/v4_tcn/encoder_product.pt
 ```
 
 checkpoint가 없거나 feature 순서·TCN shape이 맞지 않으면 runtime은 즉시 실패합니다. 학습되지 않은 random encoder로 조용히 fallback하지 않습니다. 제품 실행 시 `.pt`와 같은 디렉터리의 `config.json`을 하나의 배포 묶음으로 취급해야 합니다. runtime은 manifest의 checkpoint SHA-256, 79개 feature 순서, normalization 통계, architecture와 학습 provenance를 모두 확인하며 하나라도 다르면 실행하지 않습니다. checkpoint 파일 자체는 실행 결과이므로 저장소에 포함하지 않습니다.
 
 TCN stride 5의 겹치는 window는 반복 횟수로 세지 않습니다. `MicroMotionEpisodeDetector`가 onset/offset hysteresis, 최소 지속시간, refractory를 적용해 독립 episode로 합친 뒤 `PatternMemoryStore`가 child별 known prototype과 unknown micro-cluster를 비교합니다.
+
+현재 p1/p2/p3의 90개 action-repeat embedding 진단에서 0.20 cosine threshold는 서로 다른 action을 지나치게 많이 합쳤습니다. Product development audit의 보수적 기본값은 0.05이며 CLI에서 변경할 수 있습니다. 이 값은 진단 기준이 아니라 현재 development data 기반 engineering configuration입니다.
+
+```bash
+.venv/bin/python scripts/audit_temporal_embeddings.py \
+  --checkpoint outputs/micro_expression/v4_tcn/encoder_product.pt \
+  --output-dir outputs/micro_expression/embedding_audit/product
+```
 
 ```text
 KNOWN match             → KNOWN_OCCURRENCE
@@ -142,6 +154,29 @@ uncertain               → watch 상태로 계속 관찰
 ```
 
 초기 runtime은 `Frozen TCN + Dynamic Prototype Memory`만 사용합니다. online TCN 재학습은 꺼져 있으며, 승인된 후보 centroid만 known prototype으로 추가합니다. prototype vector는 `outputs/ondamm/pattern-memory/<child_id>/vectors.npz`에 남고 dossier audit에는 encoder/prototype digest와 source event ID만 기록합니다.
+
+Target child의 과거 세션이 충분히 쌓이면 공통 checkpoint를 초기값으로 TCN 전체를 fine-tune할 수 있습니다. 이 경로는 P1/P2/P3 성능 보존을 요구하지 않으며, future session이 train-time 선택에 섞이면 실패합니다.
+
+```bash
+.venv/bin/python scripts/train_child_personalized_tcn.py \
+  --child-id child-a \
+  --train-sessions s01 s02 \
+  --future-session s03 \
+  --device mps
+```
+
+Fine-tuned encoder로 바꾸면 embedding 공간도 달라지므로 기존 prototype vector를 그대로 재사용하지 않습니다. 승인된 source episode를 다시 embedding하거나 새 child memory를 구축한 뒤 `--temporal-checkpoint`로 명시적으로 활성화해야 합니다.
+
+최종 제품 평가는 같은 아동의 held-out future session에서만 수행합니다. Runtime은 각 실행 디렉터리에 raw frame이 없는 `temporal_detections.csv`를 자동 기록하며, 사람이 작성한 미래 세션 ground truth와 함께 다음 명령으로 평가합니다. 최종 지표는 known pattern recall/precision, false activations/min, unknown discovery precision, duplicate cluster rate, false merge rate, discovery까지 필요한 occurrence 수, eventization latency, future-session stability입니다.
+
+```bash
+.venv/bin/python scripts/evaluate_child_future_session.py \
+  --child-id child-a \
+  --future-session s03 \
+  --ground-truth path/to/s03_ground_truth.csv \
+  --detections outputs/ondamm/learning/s03/temporal_detections.csv \
+  --session-duration-seconds 1800
+```
 
 핵심 구현은 다음 모듈로 분리되어 있습니다.
 
@@ -296,10 +331,10 @@ camera frame
   → 기존 ON DAMM UI에서 재생·MediaPipe 분석·교차 검토
 ```
 
-먼저 TCN 학습을 한 번 실행해 제품용 frozen encoder checkpoint를 만듭니다. 이미 `encoder_*.pt`가 있으면 생략합니다.
+먼저 제품용 frozen encoder checkpoint를 만듭니다. 기존 `encoder_held_out_*.pt`는 연구 평가용이므로 대체되지 않습니다.
 
 ```bash
-.venv/bin/python scripts/train_v4_tcn.py
+.venv/bin/python scripts/train_product_encoder.py --device mps
 ```
 
 터미널 1에서 UI를 실행합니다.
@@ -325,45 +360,39 @@ bash scripts/ondamm_learning.sh \
   --duration-seconds 60 \
   --record-events \
   --debug-overlay \
+  --debug-preview \
+  --guided-countdown \
+  --guided-action-label '입술을 짧게 오므리기' \
+  --headless \
   --require-temporal
 ```
 
 checkpoint를 명시하려면 다음 옵션을 붙입니다.
 
 ```bash
---temporal-checkpoint outputs/micro_expression/v4_tcn/encoder_held_out_p1.pt
+--temporal-checkpoint outputs/micro_expression/v4_tcn/encoder_product.pt
 ```
 
-`--debug-overlay`는 preview뿐 아니라 새 temporal event MP4에도 skeleton, mouth/eyes/brow motion, candidate ID, `REPEAT n / 3`, `EVENT SAVED` 상태를 넣습니다. 앞의 1~2회 episode는 여전히 MP4를 쓰지 않습니다. 처음 3초는 개인 neutral motion calibration이므로 얼굴을 편하게 유지한 뒤 같은 짧은 움직임을 각각 중립 구간을 사이에 두고 세 번 수행합니다.
+`--debug-overlay`는 preview뿐 아니라 새 temporal event MP4에도 skeleton, mouth/eyes/brow motion, candidate ID, `REPEAT n / 3`, `EVENT SAVED` 상태를 넣습니다. 앞의 1~2회 episode는 여전히 MP4를 쓰지 않습니다. Calibration은 3초 wall-time만으로 끝나지 않고 기본 60개 유효 얼굴 sample, 80% face coverage, 2.5초 effective face duration을 모두 요구합니다.
 
-checkpoint를 지정하지 않으면 가장 최근 `outputs/micro_expression/v4_tcn/encoder_*.pt`를 자동 선택합니다. `--require-temporal`은 checkpoint가 없을 때 skeleton만 보여 주며 계속 진행하는 대신 즉시 실패하게 하므로 제출 촬영에 권장합니다. DINO는 기본적으로 꺼져 있으며 꼭 필요할 때만 `--demo-dino`를 사용합니다.
+checkpoint를 지정하지 않으면 오직 `outputs/micro_expression/v4_tcn/encoder_product.pt`만 사용합니다. 파일이 없을 때 LOSO checkpoint로 fallback하지 않습니다. 얼굴이 기본 0.5초 이상 사라지면 active episode와 60-frame history를 취소하고, 재검출 후 새 60-frame warmup이 끝날 때까지 novelty detection을 하지 않습니다. Overlay에는 `FACE LOST`, `WARMING UP`, calibration 부족 상태가 표시됩니다. `--require-temporal`은 product checkpoint가 없을 때 즉시 실패하게 하므로 제출 촬영에 권장합니다.
 
 실제 headless 운용은 동일 명령에 `--headless`를 추가합니다. detector와 저장 정책은 그대로이고 OpenCV 창만 표시하지 않습니다.
 
-### huro headless 실행과 Mac SSH 미리보기
+### Mac 로컬 headless 실행과 브라우저 미리보기
 
-X11 forwarding이나 원격 `cv2.imshow()`를 사용하지 않습니다. 카메라는 huro의
-`ondamm_learning_cli.py` 한 프로세스만 열고, 같은 프로세스가 만든 annotation
-frame을 opt-in MJPEG server에 전달합니다. 미리보기는 기본적으로 꺼져 있고,
-켜더라도 인증 없는 endpoint가 외부망에 노출되지 않도록 `127.0.0.1:8766`에만
-bind합니다.
+현재 실제 장비 검증은 Mac 한 대에서 진행합니다. `cv2.imshow()` 대신 같은 Mac의
+브라우저로 미리보기를 열고, 카메라는 `ondamm_learning_cli.py` 한 프로세스만 소유합니다.
+같은 프로세스가 만든 annotation frame만 opt-in MJPEG server에 전달하며 endpoint는
+`127.0.0.1`에만 bind합니다.
 
-Mac terminal에서 먼저 tunnel을 엽니다.
-
-```bash
-ssh \
-  -L 8765:127.0.0.1:8765 \
-  -L 8766:127.0.0.1:8766 \
-  huro@<host>
-```
-
-SSH로 접속한 huro terminal 1에서 ON DAMM UI를 실행합니다.
+Mac terminal 1에서 ON DAMM UI를 실행합니다.
 
 ```bash
 bash scripts/ondamm_web.sh --host 127.0.0.1 --port 8765
 ```
 
-huro terminal 2에서 single-camera runtime과 debug preview를 실행합니다.
+Mac terminal 2에서 single-camera runtime과 debug preview를 실행합니다.
 
 ```bash
 bash scripts/ondamm_learning.sh \
@@ -374,19 +403,35 @@ bash scripts/ondamm_learning.sh \
   --debug-preview \
   --debug-preview-host 127.0.0.1 \
   --debug-preview-port 8766 \
+  --debug-preview-fps 10 \
+  --guided-countdown \
+  --guided-action-label '입술을 짧게 오므리기' \
+  --review-width 960 \
+  --review-height 540 \
+  --review-buffer-fps 12 \
   --headless \
   --require-temporal
 ```
 
-그다음 Mac browser에서 다음 두 주소를 엽니다.
+Mac browser에서 다음 두 주소를 엽니다.
 
 - ON DAMM UI: `http://127.0.0.1:8765`
 - 실시간 skeleton preview: `http://127.0.0.1:8766`
 
 `--debug-preview`를 빼면 preview server 자체가 시작되지 않습니다. 비-loopback
 주소로 bind하려면 `--allow-remote-debug-preview`가 추가로 필요하지만, 인증이 없는
-발표용 stream이므로 SSH tunnel 방식에서는 사용하지 마세요. preview server는
+발표용 stream이므로 로컬 검증에서는 사용하지 마세요. preview server는
 JPEG 최신본만 RAM에 보관하며 카메라를 열거나 디스크에 영상을 쓰지 않습니다.
+JPEG encode는 camera/inference loop 밖의 worker에서 실행되고 기본 10 FPS로 제한됩니다.
+Temporal mode는 legacy recorder와 큰 frame을 중복 보관하지 않으며 review ring buffer만
+기본 960×540, 12 FPS로 유지합니다.
+
+`--guided-countdown`은 raw 분석 frame이 아니라 preview/이벤트 overlay에만 큰 안내를
+표시합니다. 보정 중에는 **얼굴을 편하게 유지하세요**, 준비가 끝나면 **3초 뒤에
+시작합니다 → 3 → 2 → 1 → 지금 움직이세요! → 중립으로 돌아오세요**를 세 번
+반복합니다. 얼굴이 사라지거나 warmup이 다시 필요하면 카운트다운을 초기화합니다.
+headless에서 이 옵션을 사용할 때는 사용자가 안내를 볼 수 있도록 `--debug-preview`가
+반드시 함께 있어야 합니다.
 
 촬영 중 overlay 상태는 다음 순서로 바뀝니다.
 
@@ -422,12 +467,12 @@ POST /api/dossiers/{child_id}/patterns/candidates/{candidate_id}/watch
 
 ```bash
 .venv/bin/python -m pytest -q
-# 382 passed, 3 skipped, 72 subtests passed
+# 404 passed, 3 skipped, 72 subtests passed
 ```
 
-세 개의 실제 held-out checkpoint에 대해서도 엄격한 contract로 79-D 입력에서
-64-D embedding이 생성되고 최신 checkpoint가 자동 선택되는 smoke test를
-통과했습니다. ON DAMM UI와 합성 annotation MJPEG stream은 로컬 브라우저에서
+세 개의 실제 held-out checkpoint와 전체 development refit product checkpoint에 대해
+엄격한 contract로 79-D 입력에서 64-D embedding이 생성되는 smoke test를 통과했습니다.
+Runtime 기본 선택은 product checkpoint로 고정되어 있습니다. ON DAMM UI와 합성 annotation MJPEG stream은 로컬 브라우저에서
 렌더링과 console error 부재를 확인했습니다.
 
 자동 테스트가 huro 현장 검증을 대신하지는 않습니다. 실제 제출 촬영 전에는

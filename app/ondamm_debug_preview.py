@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -153,6 +154,7 @@ class DebugPreviewServer:
         host: str = "127.0.0.1",
         port: int = 8766,
         jpeg_quality: int = 82,
+        max_fps: float = 10.0,
         allow_remote_bind: bool = False,
     ) -> None:
         host = str(host).strip()
@@ -166,12 +168,21 @@ class DebugPreviewServer:
             raise ValueError("debug preview port must be between 0 and 65535")
         if not 30 <= int(jpeg_quality) <= 95:
             raise ValueError("debug preview JPEG quality must be between 30 and 95")
+        if max_fps <= 0:
+            raise ValueError("debug preview max_fps must be positive")
         self.host = host
         self.port = int(port)
         self.jpeg_quality = int(jpeg_quality)
+        self.max_fps = float(max_fps)
         self._state = _LatestJpeg()
         self._server: _PreviewHttpServer | None = None
         self._thread: threading.Thread | None = None
+        self._encoder_thread: threading.Thread | None = None
+        self._pending_condition = threading.Condition()
+        self._pending_frame: np.ndarray | None = None
+        self._encoder_stopping = False
+        self._last_accepted_at = float("-inf")
+        self._accepted_count = 0
 
     @property
     def server_port(self) -> int:
@@ -194,29 +205,77 @@ class DebugPreviewServer:
             daemon=True,
         )
         self._thread.start()
+        self._encoder_stopping = False
+        self._encoder_thread = threading.Thread(
+            target=self._encode_loop,
+            name="ondamm-debug-preview-jpeg",
+            daemon=True,
+        )
+        self._encoder_thread.start()
 
-    def publish(self, frame: np.ndarray) -> None:
+    @property
+    def accepted_frame_count(self) -> int:
+        return self._accepted_count
+
+    def wait_for_frame(self, *, timeout: float = 2.0) -> bool:
+        """Wait for the asynchronous encoder in tests/startup health checks."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._state.condition:
+            while self._state.data is None and not self._state.stopping:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._state.condition.wait(timeout=remaining)
+            return self._state.data is not None
+
+    def publish(self, frame: np.ndarray) -> bool:
+        """Queue only the latest due frame; JPEG work stays off the camera loop."""
         values = np.asarray(frame)
         if values.ndim != 3 or values.shape[2] != 3 or values.dtype != np.uint8:
             raise ValueError("debug preview frame must be a uint8 BGR image")
-        ok, encoded = cv2.imencode(
-            ".jpg",
-            values,
-            [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
-        )
-        if not ok:
-            raise RuntimeError("could not encode debug preview frame")
-        self._state.publish(encoded.tobytes())
+        now = time.monotonic()
+        with self._pending_condition:
+            if now - self._last_accepted_at + 1e-9 < 1.0 / self.max_fps:
+                return False
+            self._last_accepted_at = now
+            self._accepted_count += 1
+            self._pending_frame = np.array(values, copy=True)
+            self._pending_condition.notify()
+        return True
+
+    def _encode_loop(self) -> None:
+        while True:
+            with self._pending_condition:
+                while self._pending_frame is None and not self._encoder_stopping:
+                    self._pending_condition.wait(timeout=1.0)
+                if self._encoder_stopping:
+                    return
+                frame = self._pending_frame
+                self._pending_frame = None
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
+            )
+            if ok:
+                self._state.publish(encoded.tobytes())
 
     def stop(self) -> None:
+        with self._pending_condition:
+            self._encoder_stopping = True
+            self._pending_frame = None
+            self._pending_condition.notify_all()
         self._state.stop()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=3)
+        if self._encoder_thread is not None:
+            self._encoder_thread.join(timeout=3)
         self._server = None
         self._thread = None
+        self._encoder_thread = None
 
     def __enter__(self) -> "DebugPreviewServer":
         self.start()

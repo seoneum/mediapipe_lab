@@ -1,6 +1,7 @@
 """Live demo adapter joining MediaPipe signals to the temporal product runtime."""
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -47,22 +48,48 @@ class LiveTemporalDemo:
         event_metadata_path: Path,
         record_events: bool,
         clip_fps: float,
+        session_id: str = "runtime-session",
         calibration_seconds: float = 3.0,
+        calibration_min_valid_samples: int = 60,
+        calibration_min_face_coverage: float = 0.80,
+        calibration_min_effective_seconds: float = 2.5,
+        face_loss_reset_seconds: float = 0.5,
         onset_z: float = 4.0,
         offset_z: float = 2.0,
         min_episode_seconds: float = 0.2,
         refractory_seconds: float = 0.5,
         min_occurrences_for_clip: int = 3,
         strong_candidate_occurrences: int = 5,
+        candidate_distance_threshold: float = 0.05,
         pre_seconds: float = 1.5,
         post_seconds: float = 1.0,
+        review_frame_size: tuple[int, int] = (960, 540),
+        review_buffer_fps: float = 12.0,
     ) -> None:
+        self.child_id = str(child_id).strip()
+        self.session_id = str(session_id).strip()
+        if not self.child_id or not self.session_id:
+            raise ValueError("child_id and session_id are required")
         self.encoder = TemporalEncoder.from_checkpoint(checkpoint_path)
         self.feature_adapter = TemporalFeatureAdapter(self.encoder.spec.feature_names)
-        self.motion_calibrator = PersonalMotionCalibrator(calibration_seconds=calibration_seconds)
+        self.motion_calibrator = PersonalMotionCalibrator(
+            calibration_seconds=calibration_seconds,
+            minimum_valid_samples=calibration_min_valid_samples,
+            minimum_face_coverage=calibration_min_face_coverage,
+            minimum_effective_duration=calibration_min_effective_seconds,
+        )
+        if face_loss_reset_seconds < 0:
+            raise ValueError("face_loss_reset_seconds must be non-negative")
+        self.face_loss_reset_seconds = float(face_loss_reset_seconds)
         self.onset_z = float(onset_z)
         self.checkpoint_path = checkpoint_path.expanduser().resolve()
+        self.detection_log_path = (
+            event_metadata_path.expanduser().resolve().parent
+            / "temporal_detections.csv"
+        )
+        self._logged_episode_ids: set[str] = set()
         policy = PatternMemoryPolicy(
+            candidate_distance_threshold=candidate_distance_threshold,
             min_occurrences_for_clip=min_occurrences_for_clip,
             strong_candidate_occurrences=max(strong_candidate_occurrences, min_occurrences_for_clip),
         )
@@ -93,6 +120,8 @@ class LiveTemporalDemo:
             persist_enabled=record_events,
             output_format="mp4",
             fps=clip_fps,
+            buffer_frame_size=review_frame_size,
+            buffer_fps=review_buffer_fps,
         )
         detector = MicroMotionEpisodeDetector(
             EpisodePolicy(
@@ -114,6 +143,8 @@ class LiveTemporalDemo:
         self._latest_episode: dict[str, Any] | None = None
         self._motion_score = 0.0
         self._event_saved_until = float("-inf")
+        self._face_missing_since: float | None = None
+        self._face_loss_reset = False
 
     def process(
         self,
@@ -129,18 +160,34 @@ class LiveTemporalDemo:
             raw_motion=raw_motion,
             face_detected=face_detected,
         )
-        features = self.feature_adapter.from_signal(signal)
-        outcome = self.runtime.add_observation(
-            timestamp=timestamp,
-            features=features,
-            frame=frame_for_record,
-            motion_score=self._motion_score if face_detected else 0.0,
-            quality_score=1.0 if face_detected else 0.0,
-        )
+        if not face_detected:
+            if self._face_missing_since is None:
+                self._face_missing_since = float(timestamp)
+            if (
+                not self._face_loss_reset
+                and float(timestamp) - self._face_missing_since + 1e-9 >= self.face_loss_reset_seconds
+            ):
+                self.runtime.reset_temporal_history()
+                self._face_loss_reset = True
+            outcome = self.runtime.add_frame_only(timestamp=timestamp, frame=frame_for_record)
+        else:
+            if self._face_missing_since is not None:
+                self._face_missing_since = None
+            features = self.feature_adapter.from_signal(signal)
+            outcome = self.runtime.add_observation(
+                timestamp=timestamp,
+                features=features,
+                frame=frame_for_record,
+                motion_score=self._motion_score,
+                quality_score=1.0,
+            )
+            if self.runtime.temporal_history_count >= self.encoder.spec.sequence_length:
+                self._face_loss_reset = False
         if outcome.decision:
             self._latest_decision = dict(outcome.decision)
         if outcome.episode:
             self._latest_episode = dict(outcome.episode)
+        self._append_detection(outcome, eventized_timestamp=timestamp)
         requested = (
             (_event_from_dict(outcome.requested_event),)
             if outcome.requested_event is not None
@@ -155,10 +202,23 @@ class LiveTemporalDemo:
         decision = self._latest_decision or {}
         episode = self._latest_episode or {}
         tail_ready = self.runtime.clip_recorder.has_ready_pending(current_timestamp=timestamp)
+        calibration = self.motion_calibrator.status(timestamp)
+        face_lost = self._face_missing_since is not None
+        warming_up = (
+            self.motion_calibrator.ready
+            and not face_lost
+            and self.runtime.temporal_history_count < self.encoder.spec.sequence_length
+        )
         return {
             "temporal_enabled": True,
             "checkpoint": self.checkpoint_path.name,
             "calibration_remaining": self.motion_calibrator.remaining_at(timestamp),
+            "calibration_ready": self.motion_calibrator.ready,
+            "calibration_status": calibration,
+            "face_lost": face_lost,
+            "warming_up": warming_up,
+            "warmup_frames": self.runtime.temporal_history_count,
+            "warmup_required_frames": self.encoder.spec.sequence_length,
             "motion_score": self._motion_score,
             "motion_active": self.motion_calibrator.ready and self._motion_score >= self.onset_z,
             "lifecycle": decision.get("lifecycle"),
@@ -178,6 +238,7 @@ class LiveTemporalDemo:
         outcome = self.runtime.close(timestamp=timestamp, allow_incomplete_tail=False)
         if outcome.decision:
             self._latest_decision = dict(outcome.decision)
+        self._append_detection(outcome, eventized_timestamp=timestamp)
         requested = (
             (_event_from_dict(outcome.requested_event),)
             if outcome.requested_event is not None
@@ -188,3 +249,49 @@ class LiveTemporalDemo:
 
     def abort_without_saving(self) -> None:
         self.runtime.abort_without_saving()
+
+    def _append_detection(
+        self,
+        outcome: RuntimeOutcome,
+        *,
+        eventized_timestamp: float,
+    ) -> None:
+        """Persist derived episode decisions needed for future-session metrics."""
+        if outcome.episode is None or outcome.decision is None:
+            return
+        episode_id = str(outcome.episode["episode_id"])
+        if episode_id in self._logged_episode_ids:
+            return
+        self.detection_log_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "child_id",
+            "session_id",
+            "detection_id",
+            "start_timestamp",
+            "end_timestamp",
+            "lifecycle",
+            "pattern_id",
+            "candidate_id",
+            "occurrence_count",
+            "eventized_timestamp",
+        ]
+        write_header = not self.detection_log_path.exists()
+        with self.detection_log_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "child_id": self.child_id,
+                    "session_id": self.session_id,
+                    "detection_id": episode_id,
+                    "start_timestamp": outcome.episode["start_timestamp"],
+                    "end_timestamp": outcome.episode["end_timestamp"],
+                    "lifecycle": outcome.decision["lifecycle"],
+                    "pattern_id": outcome.decision.get("pattern_id") or "",
+                    "candidate_id": outcome.decision.get("candidate_id") or "",
+                    "occurrence_count": outcome.decision.get("occurrence_count", 0),
+                    "eventized_timestamp": float(eventized_timestamp),
+                }
+            )
+        self._logged_episode_ids.add(episode_id)

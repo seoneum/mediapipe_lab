@@ -23,6 +23,7 @@ from ondamm_learning_cli import (  # noqa: E402
     normalize_demo_event,
     prepare_output_dirs,
     resolve_clips_dir,
+    resolve_temporal_checkpoint,
     show_camera_preview,
 )
 
@@ -36,6 +37,10 @@ class OnDammLearningCliTests(unittest.TestCase):
             )
         self.assertIsNone(result)
         imshow.assert_not_called()
+
+    def test_default_temporal_checkpoint_does_not_select_loso_by_mtime(self) -> None:
+        with patch("ondamm_learning_cli.Path.is_file", return_value=False):
+            self.assertIsNone(resolve_temporal_checkpoint(None))
 
     def test_deterministic_demo_finished_at_handles_minute_rollover(self) -> None:
         self.assertEqual(

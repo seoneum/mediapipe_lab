@@ -217,6 +217,8 @@ class LocalEventClipRecorder:
         persist_enabled: bool | None = None,
         output_format: str = "npz",
         fps: float | None = None,
+        buffer_frame_size: tuple[int, int] | None = None,
+        buffer_fps: float | None = None,
     ) -> None:
         self.policy = policy or EventRecordingPolicy()
         self.output_dir = output_dir
@@ -228,16 +230,41 @@ class LocalEventClipRecorder:
             raise ValueError("output_format must be 'npz' or 'mp4'")
         if fps is not None and fps <= 0:
             raise ValueError("fps must be positive")
+        if buffer_frame_size is not None and (
+            len(buffer_frame_size) != 2 or any(int(value) <= 0 for value in buffer_frame_size)
+        ):
+            raise ValueError("buffer_frame_size must contain positive width and height")
+        if buffer_fps is not None and buffer_fps <= 0:
+            raise ValueError("buffer_fps must be positive")
         self.output_format = output_format
         self.fps = float(fps) if fps is not None else None
+        self.buffer_frame_size = (
+            (int(buffer_frame_size[0]), int(buffer_frame_size[1]))
+            if buffer_frame_size is not None
+            else None
+        )
+        self.buffer_fps = float(buffer_fps) if buffer_fps is not None else None
+        self._last_buffered_timestamp = float("-inf")
         self._frames: deque[_BufferedFrame] = deque()
         self._pending_events: dict[str, EventMetadata] = {}
 
     def add_frame(self, *, frame: np.ndarray, timestamp: float) -> None:
         if not self.buffer_enabled:
             return
-        self._frames.append(_BufferedFrame(timestamp=float(timestamp), frame=np.array(frame, copy=True)))
-        self._prune_frames(current_timestamp=float(timestamp))
+        timestamp = float(timestamp)
+        if (
+            self.buffer_fps is not None
+            and timestamp - self._last_buffered_timestamp + 1e-9 < 1.0 / self.buffer_fps
+        ):
+            return
+        values = np.asarray(frame)
+        if self.buffer_frame_size is not None and values.shape[1::-1] != self.buffer_frame_size:
+            import cv2
+
+            values = cv2.resize(values, self.buffer_frame_size, interpolation=cv2.INTER_AREA)
+        self._frames.append(_BufferedFrame(timestamp=timestamp, frame=np.array(values, copy=True)))
+        self._last_buffered_timestamp = timestamp
+        self._prune_frames(current_timestamp=timestamp)
 
     def record_event(self, event: EventMetadata) -> EventMetadata:
         """Persist now when no tail is requested, otherwise queue delayed finalization.
@@ -261,7 +288,14 @@ class LocalEventClipRecorder:
             required_until = event.end_timestamp + self.policy.clip_tail_seconds
             if float(current_timestamp) + 1e-9 < required_until:
                 continue
-            ready.append(self._persist_event(event))
+            try:
+                ready.append(self._persist_event(event))
+            except Exception:
+                # A failed codec/write attempt must not permanently occupy the
+                # candidate's one pending slot. Pattern memory has no source
+                # event yet, so a later independent occurrence can retry.
+                del self._pending_events[event_id]
+                raise
             del self._pending_events[event_id]
         return ready
 
@@ -290,6 +324,12 @@ class LocalEventClipRecorder:
     @property
     def pending_event_count(self) -> int:
         return len(self._pending_events)
+
+    def has_pending_candidate(self, candidate_id: str) -> bool:
+        return any(
+            event.trigger_values.get("candidate_id") == candidate_id
+            for event in self._pending_events.values()
+        )
 
     def discard_buffered(self) -> None:
         """아동의 중단 요청처럼 저장이 허용되지 않는 종료에서 RAM 자료를 버린다."""
@@ -356,17 +396,21 @@ class LocalEventClipRecorder:
         if not writer.isOpened():
             raise RuntimeError(f"Could not open video writer for {clip_path}")
         try:
-            for entry in clip_frames:
-                frame = entry.frame
-                if frame.ndim == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                elif frame.ndim == 3 and frame.shape[2] == 4:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                if frame.shape[:2] != (height, width):
-                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-                writer.write(frame)
-        finally:
-            writer.release()
+            try:
+                for entry in clip_frames:
+                    frame = entry.frame
+                    if frame.ndim == 2:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    elif frame.ndim == 3 and frame.shape[2] == 4:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    if frame.shape[:2] != (height, width):
+                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                    writer.write(frame)
+            finally:
+                writer.release()
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         if not temporary.is_file() or temporary.stat().st_size == 0:
             temporary.unlink(missing_ok=True)
             raise RuntimeError(f"Event clip writer produced no data: {clip_path}")
