@@ -33,10 +33,12 @@ def create_dossier(dossier: Dossier) -> Path:
 def save_dossier(dossier: Dossier) -> Path:
     path = dossier_path(dossier.child_id)
     ensure_ondamm_dirs()
-    path.write_text(
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
         json.dumps(dossier.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    temporary.replace(path)
     return path
 
 

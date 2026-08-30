@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+CONSENT_PURPOSES = (
+    "camera_capture",
+    "research_metrics",
+    "model_training",
+    "remote_review",
+)
 
 
 def utc_now() -> str:
@@ -211,6 +218,183 @@ class FacialMovementProfile:
 
 
 @dataclass
+class ConsentGrant:
+    grant_id: str
+    purpose: str
+    signer_name: str
+    signature_digest: str
+    consent_document_id: str
+    form_version: str
+    guardian_consent_confirmed: bool
+    subject_assent: str
+    granted_at: str = field(default_factory=utc_now)
+    expires_at: str | None = None
+    revoked_at: str | None = None
+    revoked_by: str | None = None
+    revocation_reason: str | None = None
+    signature_method: str = "typed_attestation_digest"
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        purpose: str,
+        signer_name: str,
+        signature: str,
+        consent_document_id: str,
+        form_version: str,
+        guardian_consent_confirmed: bool,
+        subject_assent_confirmed: bool,
+        expires_at: str | None = None,
+    ) -> "ConsentGrant":
+        normalized_purpose = purpose.strip() if isinstance(purpose, str) else ""
+        if normalized_purpose not in CONSENT_PURPOSES:
+            raise ValueError(f"지원하지 않는 동의 목적입니다: {normalized_purpose or '비어 있음'}")
+        cleaned_signer = signer_name.strip() if isinstance(signer_name, str) else ""
+        cleaned_signature = signature.strip() if isinstance(signature, str) else ""
+        cleaned_document_id = consent_document_id.strip() if isinstance(consent_document_id, str) else ""
+        cleaned_form_version = form_version.strip() if isinstance(form_version, str) else ""
+        if not cleaned_signer:
+            raise ValueError("동의 확인자의 이름을 입력해 주세요.")
+        if not cleaned_signature:
+            raise ValueError("동의 확인 서명을 입력해 주세요.")
+        if not cleaned_document_id or not cleaned_form_version:
+            raise ValueError("동의서 문서 번호와 양식 버전을 입력해 주세요.")
+        if guardian_consent_confirmed is not True:
+            raise ValueError("보호자 또는 법정대리인의 동의 확인이 필요합니다.")
+        if subject_assent_confirmed is not True:
+            raise ValueError("아동에게 쉬운 방식으로 설명하고 본인의 참여 의사를 확인해 주세요.")
+        if expires_at:
+            try:
+                datetime.fromisoformat(expires_at)
+            except ValueError as exc:
+                raise ValueError("동의 만료 시각은 ISO 형식이어야 합니다.") from exc
+        return cls(
+            grant_id=f"consent-{uuid4().hex[:12]}",
+            purpose=normalized_purpose,
+            signer_name=cleaned_signer,
+            signature_digest=hashlib.sha256(cleaned_signature.encode("utf-8")).hexdigest(),
+            consent_document_id=cleaned_document_id,
+            form_version=cleaned_form_version,
+            guardian_consent_confirmed=True,
+            subject_assent="affirmed",
+            expires_at=expires_at,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ConsentGrant":
+        return cls(
+            grant_id=data["grant_id"],
+            purpose=data["purpose"],
+            signer_name=data["signer_name"],
+            signature_digest=data["signature_digest"],
+            consent_document_id=data["consent_document_id"],
+            form_version=data.get("form_version", "unknown"),
+            guardian_consent_confirmed=bool(data.get("guardian_consent_confirmed", False)),
+            subject_assent=data.get("subject_assent", "not_confirmed"),
+            granted_at=data.get("granted_at", utc_now()),
+            expires_at=data.get("expires_at"),
+            revoked_at=data.get("revoked_at"),
+            revoked_by=data.get("revoked_by"),
+            revocation_reason=data.get("revocation_reason"),
+            signature_method=data.get("signature_method", "typed_attestation_digest"),
+        )
+
+    def revoke(self, *, actor_id: str, reason: str) -> None:
+        if self.revoked_at is None:
+            self.revoked_at = utc_now()
+            self.revoked_by = actor_id.strip()
+            self.revocation_reason = reason.strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PreSessionRightsCheck:
+    check_id: str
+    operator_id: str
+    explanation_confirmed: bool
+    recording_device_recognized: bool
+    camera_off_acclimation_completed: bool
+    stop_control_practiced: bool
+    subject_willing_now: bool
+    created_at: str
+    expires_at: str
+    guardian_cross_checker: str = ""
+    educator_cross_checker: str = ""
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        operator_id: str,
+        guardian_cross_checker: str,
+        educator_cross_checker: str,
+        explanation_confirmed: bool,
+        recording_device_recognized: bool,
+        camera_off_acclimation_completed: bool,
+        stop_control_practiced: bool,
+        subject_willing_now: bool,
+        valid_minutes: int = 240,
+    ) -> "PreSessionRightsCheck":
+        cleaned_operator = operator_id.strip() if isinstance(operator_id, str) else ""
+        if not cleaned_operator:
+            raise ValueError("교육 전 확인을 진행한 담당자를 입력해 주세요.")
+        guardian_name = guardian_cross_checker.strip() if isinstance(guardian_cross_checker, str) else ""
+        educator_name = educator_cross_checker.strip() if isinstance(educator_cross_checker, str) else ""
+        if not guardian_name or not educator_name:
+            raise ValueError("보호자와 교육 담당자의 교차 확인 이름을 모두 입력해 주세요.")
+        if guardian_name == educator_name:
+            raise ValueError("교차 확인은 서로 다른 두 사람이 각각 확인해야 합니다.")
+        checks = {
+            "촬영 목적을 쉬운 방식으로 설명했는지": explanation_confirmed,
+            "카메라 또는 녹화 인형이 촬영 장치임을 확인했는지": recording_device_recognized,
+            "카메라를 끈 상태에서 적응 시간을 가졌는지": camera_off_acclimation_completed,
+            "아동이 중단 버튼을 직접 눌러 연습했는지": stop_control_practiced,
+            "아동이 지금 참여하겠다는 의사를 보였는지": subject_willing_now,
+        }
+        missing = [label for label, confirmed in checks.items() if confirmed is not True]
+        if missing:
+            raise ValueError("교육 전 확인이 완료되지 않았습니다: " + ", ".join(missing))
+        if not 5 <= int(valid_minutes) <= 480:
+            raise ValueError("교육 전 확인 유효시간은 5분에서 480분 사이여야 합니다.")
+        created = datetime.now(timezone.utc)
+        return cls(
+            check_id=f"rights-check-{uuid4().hex[:12]}",
+            operator_id=cleaned_operator,
+            explanation_confirmed=True,
+            recording_device_recognized=True,
+            camera_off_acclimation_completed=True,
+            stop_control_practiced=True,
+            subject_willing_now=True,
+            created_at=created.isoformat(),
+            expires_at=(created + timedelta(minutes=int(valid_minutes))).isoformat(),
+            guardian_cross_checker=guardian_name,
+            educator_cross_checker=educator_name,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PreSessionRightsCheck":
+        return cls(
+            check_id=data["check_id"],
+            operator_id=data["operator_id"],
+            explanation_confirmed=bool(data.get("explanation_confirmed", False)),
+            recording_device_recognized=bool(data.get("recording_device_recognized", False)),
+            camera_off_acclimation_completed=bool(data.get("camera_off_acclimation_completed", False)),
+            stop_control_practiced=bool(data.get("stop_control_practiced", False)),
+            subject_willing_now=bool(data.get("subject_willing_now", False)),
+            created_at=data["created_at"],
+            expires_at=data["expires_at"],
+            guardian_cross_checker=data.get("guardian_cross_checker", data.get("operator_id", "")),
+            educator_cross_checker=data.get("educator_cross_checker", data.get("operator_id", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Dossier:
     child_id: str
     display_name: str
@@ -226,6 +410,11 @@ class Dossier:
     approved_session_summaries: list[SessionSummary] = field(default_factory=list)
     approved_plan_history: list[RecommendationEntry] = field(default_factory=list)
     approved_facial_movement_profiles: list[FacialMovementProfile] = field(default_factory=list)
+    consent_grants: list[ConsentGrant] = field(default_factory=list)
+    pre_session_rights_checks: list[PreSessionRightsCheck] = field(default_factory=list)
+    subject_refusal_active: bool = False
+    subject_refusal_at: str | None = None
+    subject_refusal_reason: str | None = None
     access_audit_records: list[dict[str, Any]] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     created_at: str = field(default_factory=utc_now)
@@ -283,8 +472,19 @@ class Dossier:
                 FacialMovementProfile.from_dict(item)
                 for item in data.get("approved_facial_movement_profiles", [])
             ],
+            consent_grants=[
+                ConsentGrant.from_dict(item)
+                for item in data.get("consent_grants", [])
+            ],
+            pre_session_rights_checks=[
+                PreSessionRightsCheck.from_dict(item)
+                for item in data.get("pre_session_rights_checks", [])
+            ],
+            subject_refusal_active=bool(data.get("subject_refusal_active", False)),
+            subject_refusal_at=data.get("subject_refusal_at"),
+            subject_refusal_reason=data.get("subject_refusal_reason"),
             access_audit_records=list(data.get("access_audit_records", [])),
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=SCHEMA_VERSION,
             created_at=data.get("created_at", utc_now()),
             updated_at=data.get("updated_at", utc_now()),
         )
@@ -313,6 +513,27 @@ class Dossier:
                 "source_session_ids": profile.source_session_ids,
             },
         )
+
+    def add_consent_grant(self, grant: ConsentGrant) -> None:
+        for existing in self.consent_grants:
+            if existing.purpose == grant.purpose and existing.revoked_at is None:
+                existing.revoke(actor_id=grant.signer_name, reason="새 동의 확인으로 대체됨")
+        self.consent_grants.append(grant)
+        self.touch()
+
+    def add_pre_session_rights_check(self, check: PreSessionRightsCheck) -> None:
+        self.pre_session_rights_checks.append(check)
+        self.pre_session_rights_checks = self.pre_session_rights_checks[-50:]
+        self.subject_refusal_active = False
+        self.subject_refusal_at = None
+        self.subject_refusal_reason = None
+        self.touch()
+
+    def activate_subject_refusal(self, *, reason: str = "아동이 중단 버튼을 누름") -> None:
+        self.subject_refusal_active = True
+        self.subject_refusal_at = utc_now()
+        self.subject_refusal_reason = reason.strip() or "아동이 중단 의사를 표시함"
+        self.touch()
 
     def add_audit_event(self, event_type: str, actor_id: str, details: dict[str, Any]) -> None:
         self.access_audit_records.append(
@@ -344,6 +565,13 @@ class Dossier:
             "approved_facial_movement_profiles": [
                 item.to_dict() for item in self.approved_facial_movement_profiles
             ],
+            "consent_grants": [item.to_dict() for item in self.consent_grants],
+            "pre_session_rights_checks": [
+                item.to_dict() for item in self.pre_session_rights_checks
+            ],
+            "subject_refusal_active": self.subject_refusal_active,
+            "subject_refusal_at": self.subject_refusal_at,
+            "subject_refusal_reason": self.subject_refusal_reason,
             "access_audit_records": self.access_audit_records,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

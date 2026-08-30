@@ -283,6 +283,11 @@ class LocalEventClipRecorder:
     def pending_event_count(self) -> int:
         return len(self._pending_events)
 
+    def discard_buffered(self) -> None:
+        """아동의 중단 요청처럼 저장이 허용되지 않는 종료에서 RAM 자료를 버린다."""
+        self._pending_events.clear()
+        self._frames.clear()
+
     def _persist_event(
         self,
         event: EventMetadata,

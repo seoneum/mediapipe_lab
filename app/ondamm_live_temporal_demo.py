@@ -175,3 +175,6 @@ class LiveTemporalDemo:
         )
         finalized = tuple(_event_from_dict(payload) for payload in outcome.finalized_events)
         return LiveTemporalResult(requested, finalized, outcome)
+
+    def abort_without_saving(self) -> None:
+        self.runtime.abort_without_saving()

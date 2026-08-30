@@ -98,7 +98,7 @@ class OndammWebServiceTests(unittest.TestCase):
             },
         )
 
-        with self.assertRaisesRegex(RuntimeError, "withdrawn_locked"):
+        with self.assertRaisesRegex(RuntimeError, "철회로 잠긴"):
             self.service.add_session(
                 "child-web",
                 {
@@ -109,6 +109,33 @@ class OndammWebServiceTests(unittest.TestCase):
                     "approved_by": "teacher-a",
                 },
             )
+
+    def test_whole_record_withdrawal_revokes_each_purpose_consent(self) -> None:
+        self.service.grant_consent(
+            "child-web",
+            {
+                "purpose": "camera_capture",
+                "signer_name": "보호자",
+                "signature": "보호자",
+                "consent_document_id": "CAM-001",
+                "form_version": "1.0",
+                "guardian_consent_confirmed": True,
+                "subject_assent_confirmed": True,
+            },
+        )
+        self.service.change_status(
+            "child-web",
+            {
+                "status": "withdrawn_locked",
+                "actor_id": "guardian-a",
+                "reason_code": "consent_withdrawn",
+                "reason": "보호자 요청",
+            },
+        )
+
+        dossier = self.service.get_dossier("child-web")
+        self.assertIsNotNone(dossier["consent_grants"][0]["revoked_at"])
+        self.assertTrue(dossier["subject_refusal_active"])
 
     def test_export_handoff_creates_signed_readable_artifacts(self) -> None:
         result = self.service.export_handoff("child-web", {"actor_id": "teacher-a"})

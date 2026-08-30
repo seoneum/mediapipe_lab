@@ -520,19 +520,20 @@ def test_cli_missing_input_exits_2_with_cannot_open(tmp_path, capsys):
     argv = [
         "--input", str(tmp_path / "missing.mp4"),
         "--output", str(tmp_path / "out.mp4"),
+        "--child-id", "test-child",
     ]
-    code = cli.main(argv)
+    code = cli.main(argv, rights_check_fn=lambda _: None)
     assert code == 2
     err = capsys.readouterr().err
-    assert "cannot open" in err
+    assert "입력 영상 오류" in err
 
 
 def test_cli_corrupt_input_exits_2_no_traceback(tmp_path, capsys):
     bad = tmp_path / "corrupt.mp4"
     bad.write_bytes(b"garbage" * 64)
-    code = cli.main(["--input", str(bad), "--output", str(tmp_path / "out.mp4")])
+    code = cli.main(["--input", str(bad), "--output", str(tmp_path / "out.mp4"), "--child-id", "test-child"], rights_check_fn=lambda _: None)
     assert code == 2
-    assert "cannot open" in capsys.readouterr().err
+    assert "입력 영상 오류" in capsys.readouterr().err
 
 
 def test_cli_missing_models_exits_3_mentions_download_script(tmp_path, capsys, monkeypatch):
@@ -543,7 +544,8 @@ def test_cli_missing_models_exits_3_mentions_download_script(tmp_path, capsys, m
     code = cli.main([
         "--input", str(input_path),
         "--output", str(tmp_path / "out.mp4"),
-    ])
+        "--child-id", "test-child",
+    ], rights_check_fn=lambda _: None)
     assert code == 3
     err = capsys.readouterr().err
     assert "scripts/download_video_models.sh" in err
@@ -562,7 +564,8 @@ def test_cli_render_failure_exits_4(tmp_path, capsys, monkeypatch):
     code = cli.main([
         "--input", str(input_path),
         "--output", str(tmp_path / "out.mp4"),
-    ], run_fn=run_with_stubs)
+        "--child-id", "test-child",
+    ], run_fn=run_with_stubs, rights_check_fn=lambda _: None)
     assert code == 4
     err = capsys.readouterr().err
     assert "brew install ffmpeg" in err
@@ -579,11 +582,12 @@ def test_cli_happy_wiring_passes_flags_through(tmp_path, capsys):
     code = cli.main([
         "--input", str(input_path),
         "--output", str(tmp_path / "out.mp4"),
+        "--child-id", "test-child",
         "--device", "mps",
         "--sample-every", "5",
         "--metrics-json", str(tmp_path / "m.json"),
         "--metrics-csv", str(tmp_path / "m.csv"),
-    ], run_fn=fake_run)
+    ], run_fn=fake_run, rights_check_fn=lambda _: None)
     assert code == 0
     assert seen["device"] == "mps"
     assert seen["sample_every"] == 5

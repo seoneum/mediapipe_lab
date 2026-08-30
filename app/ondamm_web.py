@@ -16,13 +16,22 @@ from uuid import uuid4
 from ondamm_cli import render_handoff_markdown
 from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
-from ondamm_models import Dossier, FacialMovementProfile, SessionSummary, unique_preserving_order
+from ondamm_models import (
+    ConsentGrant,
+    Dossier,
+    FacialMovementProfile,
+    PreSessionRightsCheck,
+    SessionSummary,
+    unique_preserving_order,
+)
 from ondamm_pattern_memory import PatternMemoryStore
 from ondamm_recommendations import build_baseline_recommendation
 from ondamm_review import EventReviewStore, LocalClipCatalog, analyze_clip_with_mediapipe, ensure_browser_compatible_mp4
 from ondamm_security import build_export_manifest
 from ondamm_sensing import ObservationTally, build_sensing_draft
 from ondamm_store import create_dossier, list_dossiers, load_dossier, save_dossier
+from ondamm_rights import PURPOSE_LABELS, rights_summary
+from ondamm_purge import execute_purge, preview_purge
 import ondamm_paths
 import ondamm_store
 
@@ -41,7 +50,15 @@ def utc_now() -> str:
 def required_text(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise ValidationError(f"{key} is required")
+        labels = {
+            "child_id": "로컬 아동 ID", "display_name": "표시 이름", "age_band": "연령대",
+            "communication_modality": "의사소통 방식", "status": "기록 상태", "reason": "사유",
+            "reason_code": "사유 코드", "actor_id": "처리자", "signer_name": "동의 확인자 이름",
+            "signature": "확인 서명", "consent_document_id": "동의서 문서 번호", "form_version": "양식 버전",
+            "operator_id": "진행 담당자", "confirmation": "삭제 확인 문구", "grant_id": "동의 기록 ID",
+            "guardian_cross_checker": "보호자 교차 확인자", "educator_cross_checker": "교육 담당 교차 확인자",
+        }
+        raise ValidationError(f"{labels.get(key, key)} 항목을 입력해 주세요.")
     return value.strip()
 
 
@@ -63,9 +80,15 @@ def text_list(payload: dict[str, Any], key: str) -> list[str]:
     return unique_preserving_order(value)
 
 
+def required_confirmation(payload: dict[str, Any], key: str, label: str) -> bool:
+    if payload.get(key) is not True:
+        raise ValidationError(f"‘{label}’ 항목을 확인해 주세요.")
+    return True
+
+
 def ensure_active(dossier: Dossier, action: str) -> None:
     if dossier.canonical_status != "active":
-        raise RuntimeError(f"Cannot {action}: dossier status is {dossier.canonical_status}")
+        raise RuntimeError(f"철회로 잠긴 지원 기록철에서는 ‘{action}’ 작업을 진행할 수 없습니다.")
 
 
 class OndammWebService:
@@ -275,7 +298,7 @@ class OndammWebService:
             return cached
         browser_path = ensure_browser_compatible_mp4(
             clip.path,
-            cache_dir=Path(ondamm_paths.ONDAMM_EXPORTS) / ".web-cache",
+            cache_dir=Path(ondamm_paths.ONDAMM_EXPORTS) / ".web-cache" / dossier.child_id,
         )
         self._browser_media_cache[clip.clip_id] = browser_path
         return browser_path
@@ -465,12 +488,16 @@ class OndammWebService:
         dossier = load_dossier(self._validate_child_id(child_id))
         status = required_text(payload, "status")
         if status not in {"active", "withdrawn_locked"}:
-            raise ValidationError("status must be active or withdrawn_locked")
+            raise ValidationError("지원하지 않는 기록 상태입니다.")
         reason_code = required_text(payload, "reason_code")
         reason = required_text(payload, "reason")
         actor_id = optional_text(payload, "actor_id", "guardian-admin") or "guardian-admin"
 
         dossier.canonical_status = status
+        if status == "withdrawn_locked":
+            for grant in dossier.consent_grants:
+                grant.revoke(actor_id=actor_id, reason=f"지원 기록철 전체 동의 철회: {reason}")
+            dossier.activate_subject_refusal(reason="전체 동의 철회로 모든 촬영·분석 중단")
         dossier.add_audit_event(
             event_type="restoration_approved" if status == "active" else "authoritative_withdrawal",
             actor_id=actor_id,
@@ -478,6 +505,108 @@ class OndammWebService:
         )
         save_dossier(dossier)
         return dossier.to_dict()
+
+    def get_rights(self, child_id: str) -> dict[str, object]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        return rights_summary(dossier)
+
+    def grant_consent(self, child_id: str, payload: dict[str, Any]) -> dict[str, object]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "동의 등록")
+        purpose = required_text(payload, "purpose")
+        try:
+            grant = ConsentGrant.create(
+                purpose=purpose,
+                signer_name=required_text(payload, "signer_name"),
+                signature=required_text(payload, "signature"),
+                consent_document_id=required_text(payload, "consent_document_id"),
+                form_version=required_text(payload, "form_version"),
+                guardian_consent_confirmed=required_confirmation(
+                    payload, "guardian_consent_confirmed", "보호자 또는 법정대리인 동의"
+                ),
+                subject_assent_confirmed=required_confirmation(
+                    payload, "subject_assent_confirmed", "아동에게 쉬운 설명 후 참여 의사 확인"
+                ),
+                expires_at=optional_text(payload, "expires_at") or None,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        dossier.add_consent_grant(grant)
+        dossier.add_audit_event(
+            "consent_granted",
+            grant.signer_name,
+            {"grant_id": grant.grant_id, "purpose": purpose, "purpose_label": PURPOSE_LABELS[purpose]},
+        )
+        save_dossier(dossier)
+        return rights_summary(dossier)
+
+    def revoke_consent(self, child_id: str, payload: dict[str, Any]) -> dict[str, object]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        grant_id = required_text(payload, "grant_id")
+        actor = required_text(payload, "actor_id")
+        reason = required_text(payload, "reason")
+        grant = next((item for item in dossier.consent_grants if item.grant_id == grant_id), None)
+        if grant is None:
+            raise ValidationError("철회할 동의 기록을 찾을 수 없습니다.")
+        grant.revoke(actor_id=actor, reason=reason)
+        dossier.add_audit_event("consent_revoked", actor, {"grant_id": grant_id, "reason": reason})
+        save_dossier(dossier)
+        return rights_summary(dossier)
+
+    def complete_pre_session_check(self, child_id: str, payload: dict[str, Any]) -> dict[str, object]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        ensure_active(dossier, "교육 전 권리 확인")
+        try:
+            check = PreSessionRightsCheck.create(
+                operator_id=required_text(payload, "operator_id"),
+                guardian_cross_checker=required_text(payload, "guardian_cross_checker"),
+                educator_cross_checker=required_text(payload, "educator_cross_checker"),
+                explanation_confirmed=required_confirmation(payload, "explanation_confirmed", "쉬운 설명"),
+                recording_device_recognized=required_confirmation(
+                    payload, "recording_device_recognized", "촬영 장치 인지"
+                ),
+                camera_off_acclimation_completed=required_confirmation(
+                    payload, "camera_off_acclimation_completed", "카메라를 끈 적응 시간"
+                ),
+                stop_control_practiced=required_confirmation(
+                    payload, "stop_control_practiced", "아동의 중단 버튼 연습"
+                ),
+                subject_willing_now=required_confirmation(
+                    payload, "subject_willing_now", "현재 참여 의사"
+                ),
+                valid_minutes=int(payload.get("valid_minutes", 240)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        dossier.add_pre_session_rights_check(check)
+        dossier.add_audit_event(
+            "pre_session_rights_check_completed", check.operator_id, {"check_id": check.check_id}
+        )
+        save_dossier(dossier)
+        return rights_summary(dossier)
+
+    def child_stop(self, child_id: str, payload: dict[str, Any]) -> dict[str, object]:
+        dossier = load_dossier(self._validate_child_id(child_id))
+        reason = optional_text(payload, "reason", "아동이 ‘촬영 싫어요·중단’ 버튼을 누름")
+        dossier.activate_subject_refusal(reason=reason)
+        dossier.add_audit_event(
+            "subject_refusal_activated", "child-stop-control", {"reason": dossier.subject_refusal_reason}
+        )
+        save_dossier(dossier)
+        return rights_summary(dossier)
+
+    def preview_purge(self, child_id: str) -> dict[str, object]:
+        return preview_purge(self._validate_child_id(child_id))
+
+    def execute_purge(self, child_id: str, payload: dict[str, Any]) -> dict[str, object]:
+        try:
+            return execute_purge(
+                self._validate_child_id(child_id),
+                confirmation=required_text(payload, "confirmation"),
+                actor_id=required_text(payload, "actor_id"),
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
 
     def export_handoff(self, child_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         dossier = load_dossier(self._validate_child_id(child_id))
@@ -518,7 +647,7 @@ class OndammWebService:
     @staticmethod
     def _validate_child_id(child_id: str) -> str:
         if not CHILD_ID_PATTERN.fullmatch(child_id):
-            raise ValidationError("child_id may contain only letters, numbers, hyphens, and underscores")
+            raise ValidationError("로컬 아동 ID에는 영문, 숫자, 하이픈(-), 밑줄(_)만 사용할 수 있습니다.")
         return child_id
 
 
@@ -589,6 +718,20 @@ class ApiRouter:
                 return 201, self.service.export_handoff(child_id, body)
             if len(segments) == 4 and segments[3] == "status" and method == "POST":
                 return 200, self.service.change_status(child_id, body)
+            if len(segments) == 4 and segments[3] == "rights" and method == "GET":
+                return 200, self.service.get_rights(child_id)
+            if len(segments) == 5 and segments[3:] == ["rights", "consents"] and method == "POST":
+                return 201, self.service.grant_consent(child_id, body)
+            if len(segments) == 6 and segments[3:5] == ["rights", "consents"] and segments[5] == "revoke" and method == "POST":
+                return 200, self.service.revoke_consent(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["rights", "pre-session"] and method == "POST":
+                return 201, self.service.complete_pre_session_check(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["rights", "child-stop"] and method == "POST":
+                return 200, self.service.child_stop(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["purge", "preview"] and method == "POST":
+                return 200, self.service.preview_purge(child_id)
+            if len(segments) == 5 and segments[3:] == ["purge", "execute"] and method == "POST":
+                return 200, self.service.execute_purge(child_id, body)
 
         return 404, {"error": "not_found", "message": "요청한 기능을 찾을 수 없습니다."}
 

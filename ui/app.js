@@ -13,6 +13,8 @@ const state = {
   clipBusy: null,
   patternMemory: null,
   patternBusy: null,
+  rights: null,
+  acclimationCompleted: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -134,6 +136,8 @@ async function loadPatternMemory({ silent = false } = {}) {
 
 async function selectChild(childId) {
   state.current = await api(`/api/dossiers/${encodeURIComponent(childId)}`);
+  state.rights = await api(`/api/dossiers/${encodeURIComponent(childId)}/rights`);
+  state.acclimationCompleted = false;
   localStorage.setItem("ondamm-selected-child", childId);
   state.recommendationPayload = null;
   state.recommendationDraft = null;
@@ -163,6 +167,7 @@ function renderEmpty() {
   $("#subject-avatar").textContent = "–";
   $("#status-pill").hidden = true;
   $("#manage-status-button").disabled = true;
+  $("#child-stop-button").disabled = true;
   $$('[data-action="new-session"]').forEach((button) => { button.disabled = true; });
 }
 
@@ -176,6 +181,7 @@ function renderCurrent() {
   $("#welcome-name").textContent = dossier.display_name;
   $("#updated-at").textContent = formatDate(dossier.updated_at, true);
   $("#manage-status-button").disabled = false;
+  $("#child-stop-button").disabled = false;
 
   const active = dossier.canonical_status === "active";
   const statusPill = $("#status-pill");
@@ -209,18 +215,45 @@ function renderCurrent() {
   $("#detail-handoff").innerHTML = noteMarkup(dossier.handoff_notes);
   const facialProfiles = dossier.approved_facial_movement_profiles || [];
   $("#detail-facial-profiles").innerHTML = facialProfiles.length
-    ? facialProfiles.map((profile) => `<div><strong>${escapeHtml(profile.display_name)}</strong> · ${escapeHtml(profile.blendshape_names.join(", "))} · threshold ${Number(profile.activation_threshold).toFixed(2)} · 승인 ${escapeHtml(profile.approved_by)}</div>`).join("")
+    ? facialProfiles.map((profile) => `<div><strong>${escapeHtml(profile.display_name)}</strong> · ${escapeHtml(profile.blendshape_names.join(", "))} · 활성 기준 ${Number(profile.activation_threshold).toFixed(2)} · 승인 ${escapeHtml(profile.approved_by)}</div>`).join("")
     : `<div class="empty-inline">기본 얼굴 움직임 규칙을 사용 중입니다. 승인된 개인화 프로필은 아직 없습니다.</div>`;
 
   renderSessions();
   renderPlans();
   renderRecommendationPlaceholder();
   $("#learning-plan").innerHTML = "";
-  $("#sensing-result").innerHTML = `<div class="preview-placeholder"><span class="draft-stamp">DRAFT</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>`;
+  $("#sensing-result").innerHTML = `<div class="preview-placeholder"><span class="draft-stamp">초안</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>`;
   renderClipReview();
   renderPatternMemory();
+  renderRights();
   $("#export-result").innerHTML = "";
   setTab(state.tab);
+}
+
+function renderRights() {
+  const rights = state.rights;
+  if (!rights || !state.current) return;
+  const camera = rights.purposes?.camera_capture;
+  const research = rights.purposes?.research_metrics;
+  const ready = rights.pre_session_ready && camera?.active;
+  const recordActive = state.current.canonical_status === "active";
+  const badge = $("#rights-ready-badge");
+  badge.textContent = ready ? "촬영 준비 확인됨" : "촬영 준비 안 됨";
+  badge.classList.toggle("locked", !ready);
+  $("#rights-summary").innerHTML = `
+    ${recordActive ? "" : `<div class="rights-state stop"><strong>기록철 잠김</strong><span>동의 철회 상태이므로 새 동의와 교육 전 확인을 등록할 수 없습니다.</span></div>`}
+    <div class="rights-state ${camera?.active ? "ok" : "warn"}"><strong>촬영 동의</strong><span>${camera?.active ? `확인됨 · ${escapeHtml(camera.signer_name || "")}` : "서명 동의가 아직 없습니다."}</span></div>
+    <div class="rights-state ${research?.active ? "ok" : "warn"}"><strong>연구 전용 지표 동의</strong><span>${research?.active ? `확인됨 · ${escapeHtml(research.signer_name || "")}` : "동의가 없으면 표정·흥미·주의 분석은 실행되지 않습니다."}</span></div>
+    <div class="rights-state ${rights.pre_session_ready ? "ok" : "warn"}"><strong>교육 전 확인</strong><span>${rights.pre_session_ready ? `완료 · ${formatDate(rights.pre_session_check?.expires_at, true)}까지` : "적응·설명·중단 연습·현재 의사를 확인해 주세요."}</span></div>
+    <div class="rights-state ${rights.child_stop_active ? "stop" : "ok"}"><strong>아동의 현재 선택</strong><span>${escapeHtml(rights.child_stop_message)}</span></div>`;
+  $("#child-stop-button").classList.toggle("active-stop", rights.child_stop_active);
+  $$("form input, form select, form button, #acclimation-button", $("#rights-panel")).forEach((control) => {
+    control.disabled = !recordActive;
+  });
+  if (recordActive) {
+    $("#acclimation-confirmed").disabled = !state.acclimationCompleted;
+    $("#acclimation-button").disabled = Boolean(acclimationInterval) || state.acclimationCompleted;
+  }
 }
 
 function renderSessions() {
@@ -268,7 +301,7 @@ function renderPatternMemory() {
   const candidates = memory.candidates || [];
   const knownMarkup = known.length ? known.map((pattern) => `
     <article class="pattern-card known-pattern">
-      <div class="pattern-card-head"><span>KNOWN</span><strong>${escapeHtml(pattern.display_name)}</strong></div>
+      <div class="pattern-card-head"><span>승인된 패턴</span><strong>${escapeHtml(pattern.display_name)}</strong></div>
       <p>${escapeHtml(pattern.pattern_id)} · 승인 근거 ${pattern.support_count}회</p>
       <div class="pattern-stats"><span>후속 검출 <b>${pattern.occurrence_count}</b></span><span>거리 임계값 <b>${Number(pattern.distance_threshold).toFixed(3)}</b></span></div>
       <small>prototype ${escapeHtml(pattern.prototype_digest.slice(0, 12))}… · ${escapeHtml(pattern.approved_by)}</small>
@@ -289,7 +322,7 @@ function renderPatternMemory() {
       actionMarkup += `<p class="pattern-review-hint">3개 역할의 합의 후 별도 승격 또는 suppression을 실행할 수 있습니다.</p>`;
     }
     return `<article class="pattern-card candidate-pattern">
-      <div class="pattern-card-head"><span>${candidate.occurrence_count >= memory.policy.strong_candidate_occurrences ? "STRONG CANDIDATE" : "UNKNOWN"}</span><strong>${escapeHtml(candidate.candidate_id)}</strong></div>
+      <div class="pattern-card-head"><span>${candidate.occurrence_count >= memory.policy.strong_candidate_occurrences ? "반복이 뚜렷한 검토 후보" : "아직 이름 붙이지 않은 후보"}</span><strong>${escapeHtml(candidate.candidate_id)}</strong></div>
       <p>반복 ${candidate.occurrence_count} / ${memory.policy.min_occurrences_for_clip} · ${escapeHtml(candidate.review_state)}</p>
       <div class="pattern-stats"><span>평균 길이 <b>${Number(candidate.mean_duration_seconds).toFixed(2)}초</b></span><span>품질 <b>${Math.round(Number(candidate.mean_quality_score) * 100)}%</b></span><span>개인화 threshold <b>${Number(candidate.recommended_distance_threshold ?? memory.policy.known_distance_threshold).toFixed(3)}</b></span></div>
       <small>nearest known ${escapeHtml(candidate.nearest_known_pattern || "없음")} · distance ${Number(candidate.nearest_known_distance).toFixed(3)} · 영상 ${clip ? "1개" : "없음"}</small>
@@ -297,7 +330,7 @@ function renderPatternMemory() {
     </article>`;
   }).join("") : `<div class="empty-inline">관찰 중인 unknown candidate가 없습니다.</div>`;
   workspace.innerHTML = `
-    <div class="pattern-policy-strip card"><span>TCN <b>FROZEN</b></span><span>Prototype update <b>HUMAN ONLY</b></span><span>Clip threshold <b>${memory.policy.min_occurrences_for_clip} episodes</b></span><span>1~${memory.policy.min_occurrences_for_clip - 1}회 <b>NO MP4</b></span></div>
+    <div class="pattern-policy-strip card"><span>시간 흐름 인코더 <b>고정</b></span><span>기준 패턴 갱신 <b>사람만 승인</b></span><span>짧은 영상 기준 <b>${memory.policy.min_occurrences_for_clip}회 반복</b></span><span>1~${memory.policy.min_occurrences_for_clip - 1}회 <b>영상 저장 안 함</b></span></div>
     <div class="pattern-columns"><section><h4>새로운 반복 후보</h4><div class="pattern-grid">${candidateMarkup}</div></section><section><h4>승인된 Known pattern</h4><div class="pattern-grid">${knownMarkup}</div></section></div>`;
 }
 
@@ -362,7 +395,7 @@ function crossReviewMarkup() {
     </article>`;
   }).join("");
   return `<section class="card cross-review-panel">
-    <div class="cross-review-head"><div><p class="eyebrow">THREE-WAY CROSS REVIEW</p><h4>보호자 · 교사 · 기관 사회복지사 교차 검토</h4><p>각 역할이 먼저 독립 의견을 남깁니다. 일치 여부는 표시만 하며 기록철에는 자동 반영하지 않습니다.</p></div><span class="review-status status-${escapeHtml(summary.status)}">${escapeHtml(reviewStatusName(summary.status))}</span></div>
+    <div class="cross-review-head"><div><p class="eyebrow">세 역할의 독립 교차 검토</p><h4>보호자 · 교사 · 기관 사회복지사 교차 검토</h4><p>각 역할이 먼저 독립 의견을 남깁니다. 일치 여부는 표시만 하며 기록철에는 자동 반영하지 않습니다.</p></div><span class="review-status status-${escapeHtml(summary.status)}">${escapeHtml(reviewStatusName(summary.status))}</span></div>
     <div class="role-review-grid">${roleCards}</div>
     <form id="event-review-form" class="event-review-form">
       <div class="review-form-grid">
@@ -421,7 +454,7 @@ function renderClipReview() {
           </button>`).join("")}</div>
       </aside>
       <article class="card clip-player-panel">
-        <div class="clip-panel-head"><div><span>로컬 재생</span><strong>${escapeHtml(eventTypeName(selected.event_type))}</strong></div><span class="local-only-pill">LOCAL ONLY</span></div>
+        <div class="clip-panel-head"><div><span>로컬 재생</span><strong>${escapeHtml(eventTypeName(selected.event_type))}</strong></div><span class="local-only-pill">이 기기에서만</span></div>
         <video controls playsinline preload="metadata" src="${escapeHtml(selected.media_url)}" aria-label="선택한 로컬 특이 이벤트 영상"></video>
         <div class="clip-trigger-grid">${triggerMarkup}</div>
         <p class="clip-path">${escapeHtml(selected.relative_path)}</p>
@@ -469,7 +502,7 @@ function renderRecommendationPlaceholder() {
 function renderRecommendation(draft) {
   $("#recommendation-preview").innerHTML = `
     <div class="recommendation-result">
-      <div class="result-head"><div><p class="eyebrow">REVIEW DRAFT · NOT SAVED</p><h3>${escapeHtml(draft.goal)}</h3></div><span class="draft-banner">승인 전 초안</span></div>
+      <div class="result-head"><div><p class="eyebrow">검토용 초안 · 아직 저장 안 됨</p><h3>${escapeHtml(draft.goal)}</h3></div><span class="draft-banner">승인 전 초안</span></div>
       <p class="summary">${escapeHtml(draft.summary)}</p>
       <h4>제안 활동</h4><ol>${draft.suggested_activities.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>
       <h4>근거</h4><ul>${draft.rationale_lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
@@ -756,7 +789,7 @@ $("#sensing-form").addEventListener("submit", async (event) => {
     });
     const expressionHint = Object.entries(result.facial_movement_counts || result.expression_label_counts || {}).sort((a, b) => b[1] - a[1])[0]?.[0];
     $("#sensing-result").innerHTML = `
-      <div class="result-head"><div><p class="eyebrow">REVIEWED NOTE DRAFT</p><h3>관찰 메모 초안</h3></div><span class="draft-stamp">DRAFT</span></div>
+      <div class="result-head"><div><p class="eyebrow">검토할 관찰 메모</p><h3>관찰 메모 초안</h3></div><span class="draft-stamp">초안</span></div>
       <div class="sensing-metrics"><div><span>프레임</span><strong>${result.frame_count}</strong></div><div><span>얼굴 존재</span><strong>${Math.round(result.face_present_ratio * 100)}%</strong></div><div><span>자세 추정</span><strong>${Math.round(result.pose_present_ratio * 100)}%</strong></div><div><span>미세 움직임</span><strong>${escapeHtml(expressionHintName(expressionHint))}</strong></div></div>
       <div class="draft-lines">${result.reviewed_note_draft.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div>
       <div class="non-authoritative"><strong>비권위 초안</strong><br>${escapeHtml(result.non_authoritative_notice)}</div>`;
@@ -784,9 +817,11 @@ $("#manage-status-button").addEventListener("click", () => {
   form.elements.reason.value = "";
   $("#status-dialog-copy").innerHTML = active
     ? `<div class="status-warning"><strong>동의 철회 잠금</strong><br>조회·수정·추천·인수인계·내보내기를 막습니다. 민감한 상태 변경이므로 사유를 기록해 주세요.</div>`
-    : `<div class="status-restore"><strong>기록철 활성 복구</strong><br>승인된 근거가 있을 때만 다시 활성화합니다. 복구 사유는 감사 기록에 남습니다.</div>`;
+    : `<div class="status-restore"><strong>기록철 활성 복구</strong><br>승인된 근거가 있을 때만 다시 활성화합니다. 이전 동의는 되살아나지 않으며, 새 목적별 동의와 교육 전 확인이 필요합니다.</div>`;
   $("#status-submit").textContent = active ? "동의 철회로 잠금" : "승인 근거로 활성 복구";
   $("#status-submit").className = `button ${active ? "button-danger" : "button-primary"}`;
+  $("#purge-section").hidden = active;
+  $("#purge-preview").innerHTML = "";
   $("#status-dialog").showModal();
 });
 
@@ -798,8 +833,115 @@ $("#status-form").addEventListener("submit", async (event) => {
       method: "POST", body: Object.fromEntries(data.entries()),
     });
     $("#status-dialog").close();
-    toast(data.get("status") === "active" ? "지원 기록철을 활성 상태로 복구했습니다." : "동의 철회 상태로 잠갔습니다.");
+    toast(data.get("status") === "active" ? "기록철을 활성화했습니다. 촬영 전 새 동의와 권리 확인이 필요합니다." : "동의를 철회하고 모든 촬영·분석을 잠갔습니다.");
     await refreshCurrent();
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#purge-preview-button").addEventListener("click", async () => {
+  if (!state.current) return;
+  try {
+    const preview = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/purge/preview`, { method: "POST", body: {} });
+    $("#purge-preview").innerHTML = `
+      <div class="purge-warning"><strong>${escapeHtml(preview.title)}</strong><p>${escapeHtml(preview.warning)}</p>
+      <ul>${preview.targets.map((item) => `<li><strong>${escapeHtml(item.category_label)}</strong><small>${escapeHtml(item.path)}</small></li>`).join("") || "<li>현재 확인된 삭제 대상이 없습니다.</li>"}</ul>
+      <label>삭제 실행 담당자<input id="purge-actor" value="guardian-admin"></label>
+      <label>확인 문구<input id="purge-confirmation" placeholder="${escapeHtml(preview.confirmation_phrase)}"></label>
+      <button class="button button-danger full-button" id="purge-execute-button" type="button">복구할 수 없는 실제 삭제 실행</button></div>`;
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#purge-preview").addEventListener("click", async (event) => {
+  if (!event.target.closest("#purge-execute-button") || !state.current) return;
+  const childId = state.current.child_id;
+  try {
+    const result = await api(`/api/dossiers/${encodeURIComponent(childId)}/purge/execute`, {
+      method: "POST", body: { actor_id: $("#purge-actor").value.trim(), confirmation: $("#purge-confirmation").value },
+    });
+    $("#status-dialog").close();
+    state.current = null;
+    toast(`${result.message} 익명화된 삭제 확인서를 남겼습니다.`);
+    await loadDossiers();
+  } catch (error) { toast(error.message, "error"); }
+});
+
+async function reloadRights() {
+  if (!state.current) return;
+  state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights`);
+  state.current = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}`);
+  renderRights();
+}
+
+$("#child-stop-button").addEventListener("click", async () => {
+  if (!state.current) return;
+  try {
+    state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights/child-stop`, {
+      method: "POST", body: { reason: "아동이 웹의 ‘촬영 싫어요·중단’ 버튼을 누름" },
+    });
+    state.current.subject_refusal_active = true;
+    renderRights();
+    toast("촬영 중단 요청을 보냈습니다. 실행 중인 카메라는 곧 멈춥니다.", "error");
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#camera-consent-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.current) return;
+  const data = new FormData(event.currentTarget);
+  const body = Object.fromEntries(data.entries());
+  body.guardian_consent_confirmed = data.get("guardian_consent_confirmed") === "on";
+  body.subject_assent_confirmed = data.get("subject_assent_confirmed") === "on";
+  try {
+    state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights/consents`, { method: "POST", body });
+    event.currentTarget.reset();
+    event.currentTarget.elements.form_version.value = "1.0";
+    renderRights();
+    toast("선택한 목적의 서명 동의를 이 기기에 등록했습니다.");
+  } catch (error) { toast(error.message, "error"); }
+});
+
+let acclimationInterval = null;
+$("#acclimation-button").addEventListener("click", () => {
+  if (acclimationInterval) return;
+  let remaining = 180;
+  state.acclimationCompleted = false;
+  $("#acclimation-button").disabled = true;
+  $("#acclimation-message").textContent = "카메라를 켜지 말고, 촬영 장치를 보여 주며 편안하게 적응해 주세요.";
+  acclimationInterval = window.setInterval(() => {
+    remaining -= 1;
+    $("#acclimation-timer").textContent = `${String(Math.floor(remaining / 60)).padStart(2, "0")}:${String(remaining % 60).padStart(2, "0")}`;
+    if (remaining <= 0) {
+      window.clearInterval(acclimationInterval);
+      acclimationInterval = null;
+      state.acclimationCompleted = true;
+      $("#acclimation-confirmed").disabled = false;
+      $("#acclimation-confirmed").checked = true;
+      $("#acclimation-message").textContent = "적응 시간이 끝났습니다. 아동이 편안한지 다시 묻고 나머지 항목을 확인해 주세요.";
+      $("#acclimation-button").textContent = "카메라를 끈 적응 완료";
+      toast("카메라를 끈 적응 시간이 끝났습니다.");
+    }
+  }, 1000);
+});
+
+$("#pre-session-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.current) return;
+  if (!state.acclimationCompleted) return toast("먼저 카메라를 끈 3분 적응 시간을 마쳐 주세요.", "error");
+  const data = new FormData(event.currentTarget);
+  const body = {
+    operator_id: data.get("operator_id").trim(),
+    guardian_cross_checker: data.get("guardian_cross_checker").trim(),
+    educator_cross_checker: data.get("educator_cross_checker").trim(),
+    valid_minutes: Number(data.get("valid_minutes")),
+  };
+  ["explanation_confirmed", "recording_device_recognized", "camera_off_acclimation_completed", "stop_control_practiced", "subject_willing_now"].forEach((key) => {
+    body[key] = data.get(key) === "on";
+  });
+  try {
+    state.rights = await api(`/api/dossiers/${encodeURIComponent(state.current.child_id)}/rights/pre-session`, { method: "POST", body });
+    await reloadRights();
+    renderCurrent();
+    toast("교육 전 권리 확인을 마쳤습니다. 유효시간 동안만 촬영을 시작할 수 있습니다.");
   } catch (error) { toast(error.message, "error"); }
 });
 

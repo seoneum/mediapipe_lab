@@ -25,6 +25,7 @@ from ondamm_facial_movement import FacialMovementAnalysis, analyze_facial_moveme
 from ondamm_paths import ONDAMM_EXPORTS
 from ondamm_sensing import ObservationTally, build_sensing_draft
 from ondamm_store import load_dossier
+from ondamm_rights import RightsBlockedError, require_camera_session
 from paths import HOLISTIC_MODEL, base_options
 
 POSE_LEFT_SHOULDER = 11
@@ -151,11 +152,10 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
         min_hand_landmarks_confidence=0.5,
     )
     tally = ObservationTally()
-    try:
-        dossier = load_dossier(args.child_id)
-        movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
-    except FileNotFoundError:
-        movement_rules = rules_from_approved_profiles([])
+    dossier = load_dossier(args.child_id)
+    rights_check = require_camera_session(dossier)
+    print(f"권리 확인 완료: {rights_check.check_id} · 아동의 중단 요청을 계속 확인합니다.")
+    movement_rules = rules_from_approved_profiles(dossier.approved_facial_movement_profiles)
     cap = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
@@ -164,10 +164,17 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
 
     started = time.time()
     with holistic_landmarker.HolisticLandmarker.create_from_options(options) as detector:
+        frame_index = 0
         while time.time() - started < args.duration_seconds:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
+            if frame_index % 15 == 0:
+                try:
+                    require_camera_session(load_dossier(args.child_id))
+                except RightsBlockedError as exc:
+                    print(f"촬영 중단: {exc}")
+                    break
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((time.time() - started) * 1000)
@@ -229,6 +236,7 @@ def run_camera_mode(args: argparse.Namespace) -> dict:
                 cv2.imshow("ON DAMM sensing draft", preview)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
+            frame_index += 1
     cap.release()
     cv2.destroyAllWindows()
     draft = build_sensing_draft(

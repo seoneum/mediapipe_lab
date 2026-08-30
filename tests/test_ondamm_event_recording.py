@@ -169,6 +169,30 @@ class OnDammEventRecordingTests(unittest.TestCase):
         recorded_event = recorder.record_event(event)
         self.assertIsNone(recorded_event.clip_path)
 
+    def test_child_stop_discards_ram_frames_and_pending_clip(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ondamm-stop-") as temp_dir:
+            recorder = LocalEventClipRecorder(
+                policy=EventRecordingPolicy(clip_tail_seconds=1.0),
+                output_dir=Path(temp_dir),
+                recording_enabled=True,
+            )
+            recorder.add_frame(frame=np.zeros((2, 2, 3), dtype=np.uint8), timestamp=0.0)
+            recorder.record_event(
+                EventMetadata.create(
+                    event_type="facial_movement_detected",
+                    start_timestamp=0.0,
+                    end_timestamp=0.2,
+                    trigger_values={"duration_seconds": 0.2},
+                )
+            )
+            self.assertEqual(recorder.pending_event_count, 1)
+
+            recorder.discard_buffered()
+
+            self.assertEqual(recorder.pending_event_count, 0)
+            self.assertEqual(recorder.buffered_frame_count, 0)
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

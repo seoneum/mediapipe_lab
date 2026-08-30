@@ -133,6 +133,10 @@ class MicroMotionRuntime:
             tuple(event.to_dict() for event in finalized),
         )
 
+    def abort_without_saving(self) -> None:
+        """현재 episode와 RAM 프레임을 디스크에 쓰지 않고 폐기한다."""
+        self.clip_recorder.discard_buffered()
+
     def _handle_episode(self, episode: MotionEpisode) -> tuple[PatternDecision, EventMetadata | None]:
         decision = self.pattern_memory.observe_episode(
             episode_id=episode.episode_id,

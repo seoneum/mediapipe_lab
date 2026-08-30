@@ -18,6 +18,7 @@ from ondamm_learning import build_learning_program_plan, build_learning_run_summ
 from ondamm_models import Dossier, unique_preserving_order, utc_now
 from ondamm_paths import ONDAMM_EXPORTS, ONDAMM_LEARNING_EXPORTS
 from ondamm_store import load_dossier
+from ondamm_rights import RightsBlockedError, require_camera_session
 
 
 RAW_MEDIA_NOTICE = "raw media 저장은 명시적으로 --record-events 를 선택한 경우에만 로컬 출력 디렉터리에 남습니다."
@@ -325,12 +326,20 @@ def run_camera_mode(
     fps_ema = 0.0
     timestamp_ms = -1
     elapsed = 0.0
+    stopped_by_child = False
     print("demo_controls: ESC/Q stop" + (", B capture DINO baseline" if args.demo_dino else ""))
     try:
         while time.time() - wall_started < args.duration_seconds:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
+            if frame_index % 15 == 0:
+                try:
+                    require_camera_session(load_dossier(args.child_id))
+                except RightsBlockedError as exc:
+                    stopped_by_child = True
+                    print(f"촬영 중단: {exc}")
+                    break
             elapsed = round(time.time() - wall_started, 3)
             now_loop = time.perf_counter()
             instant_fps = 1.0 / max(now_loop - previous_loop, 1e-6)
@@ -408,7 +417,11 @@ def run_camera_mode(
                     extractor.capture_baseline()
             frame_index += 1
     finally:
-        if temporal_demo is not None:
+        if stopped_by_child:
+            recorder.discard_buffered()
+            if temporal_demo is not None:
+                temporal_demo.abort_without_saving()
+        elif temporal_demo is not None:
             temporal_result = temporal_demo.close(timestamp=elapsed)
             append_unique_events(detected_events, temporal_result.requested_events)
             append_unique_events(recorded_events, temporal_result.finalized_events)
@@ -585,6 +598,9 @@ def main() -> None:
         raise ValueError("temporal clip pre/post seconds must be non-negative")
 
     dossier = load_dossier(args.child_id)
+    if not args.demo:
+        rights_check = require_camera_session(dossier)
+        print(f"권리 확인 완료: {rights_check.check_id} · 아동은 언제든 웹의 ‘촬영 싫어요·중단’ 버튼을 누를 수 있습니다.")
     if args.movement_label:
         from ondamm_facial_movement import rules_from_approved_profiles
 

@@ -317,13 +317,16 @@ def command_prepare_reestablishment(args: argparse.Namespace) -> None:
 def command_withdraw_dossier(args: argparse.Namespace) -> None:
     dossier = load_dossier(args.child_id)
     dossier.canonical_status = "withdrawn_locked"
+    for grant in dossier.consent_grants:
+        grant.revoke(actor_id=args.actor_id, reason=f"지원 기록철 전체 동의 철회: {args.reason}")
+    dossier.activate_subject_refusal(reason="전체 동의 철회로 모든 촬영·분석 중단")
     dossier.add_audit_event(
         event_type="authoritative_withdrawal",
         actor_id=args.actor_id,
         details={"reason_code": args.reason_code, "reason": args.reason},
     )
     path = save_dossier(dossier)
-    print(f"withdrawn: {path}")
+    print(f"동의 철회로 잠갔습니다: {path}")
 
 
 def command_restore_dossier(args: argparse.Namespace) -> None:
@@ -335,7 +338,8 @@ def command_restore_dossier(args: argparse.Namespace) -> None:
         details={"reason_code": args.reason_code, "reason": args.reason},
     )
     path = save_dossier(dossier)
-    print(f"restored: {path}")
+    print(f"지원 기록철을 활성화했습니다: {path}")
+    print("이전 동의는 복구되지 않습니다. 새 목적별 동의와 교육 전 권리 확인을 진행해 주세요.")
 
 
 def build_parser() -> argparse.ArgumentParser:
