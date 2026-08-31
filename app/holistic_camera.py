@@ -12,6 +12,7 @@ os.environ.setdefault(
 
 import cv2
 import mediapipe as mp
+import numpy as np
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import holistic_landmarker
 

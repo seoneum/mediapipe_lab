@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#183f39">
+  <title>ON DAMM · 지원 기록철</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="아동 선택">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+        <div><strong>ON DAMM</strong><small>지원 기록철</small></div>
+      </div>
+      <div class="local-badge"><span class="status-dot"></span> 이 기기에만 저장</div>
+
+      <div class="side-heading">
+        <span>지원 대상</span>
+        <button class="icon-button" id="new-child-button" type="button" aria-label="새 지원 기록철 만들기">＋</button>
+      </div>
+      <div class="child-list" id="child-list" role="listbox" aria-label="지원 기록철 목록"></div>
+
+      <div class="sidebar-bottom">
+        <div class="privacy-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2m-11 0h12v10H6z"/></svg>
+          <div><strong>로컬 우선</strong><span>원격 동기화 없이 현재 실행 기기에 저장됩니다.</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" type="button" aria-label="지원 대상 목록 열기">☰</button>
+        <div class="subject-title">
+          <div class="avatar" id="subject-avatar">–</div>
+          <div>
+            <div class="title-line"><h1 id="subject-name">지원 기록철을 선택하세요</h1><span class="status-pill" id="status-pill" hidden>활성</span></div>
+            <p id="subject-meta">아동별 지원 정보와 승인된 기록을 안전하게 관리합니다.</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="button child-stop-button" id="child-stop-button" type="button" disabled>촬영 싫어요 · 중단</button>
+          <button class="button button-quiet" id="manage-status-button" type="button" disabled>동의·상태 관리</button>
+          <button class="button button-primary" data-action="new-session" type="button" disabled>수업 기록 남기기</button>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="기록철 메뉴">
+        <button class="tab active" data-tab="overview" type="button">오늘</button>
+        <button class="tab" data-tab="dossier" type="button">지원 기록철</button>
+        <button class="tab" data-tab="sessions" type="button">수업 기록</button>
+        <button class="tab" data-tab="plan" type="button">다음 활동</button>
+        <button class="tab" data-tab="observation" type="button">관찰 보조 <span class="draft-chip">초안</span></button>
+        <button class="tab" data-tab="handoff" type="button">인수인계</button>
+      </nav>
+
+      <div class="content">
+        <section class="empty-screen" id="empty-screen">
+          <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span></div>
+          <p class="eyebrow">이 기기에 안전하게 저장</p>
+          <h2>첫 지원 기록철을 만들어 주세요</h2>
+          <p>선호, 효과적인 지원 전략, 수업 반응을 한곳에 쌓고<br>다음 담당자가 이해할 수 있는 기록으로 이어갑니다.</p>
+          <button class="button button-primary" id="empty-create-button" type="button">지원 기록철 만들기</button>
+        </section>
+
+        <section class="view active" id="view-overview" data-view="overview" hidden>
+          <div class="welcome-row">
+            <div>
+              <p class="eyebrow">오늘의 지원</p>
+              <h2><span id="welcome-name">–</span>님의 지원 흐름</h2>
+              <p>확인된 정보에서 시작하고, 관찰은 반드시 사람이 검토합니다.</p>
+            </div>
+            <div class="updated-label">최근 갱신 <strong id="updated-at">–</strong></div>
+          </div>
+
+          <div class="overview-grid">
+            <article class="card next-step-card">
+              <div class="card-head"><div><p class="eyebrow">다음 순서</p><h3>오늘 무엇을 할까요?</h3></div><span class="step-counter" id="readiness-count">0 / 3</span></div>
+              <div class="flow-list">
+                <button class="flow-item" data-go="dossier" type="button"><span class="flow-number">1</span><div><strong>지원 정보 확인</strong><small>선호와 효과적인 전략을 먼저 확인합니다.</small></div><span class="flow-arrow">→</span></button>
+                <button class="flow-item" data-go="plan" type="button"><span class="flow-number">2</span><div><strong>다음 활동 초안 만들기</strong><small>목표와 보호자 입력을 바탕으로 초안을 봅니다.</small></div><span class="flow-arrow">→</span></button>
+                <button class="flow-item" data-action="new-session" type="button"><span class="flow-number">3</span><div><strong>수업 후 승인 기록 남기기</strong><small>관찰과 해석을 분리해 직접 승인합니다.</small></div><span class="flow-arrow">→</span></button>
+              </div>
+            </article>
+
+            <article class="card profile-glance">
+              <div class="card-head"><div><p class="eyebrow">한눈에 보기</p><h3>지원 핵심</h3></div><button class="text-button" data-go="dossier" type="button">전체 보기</button></div>
+              <div class="support-block"><span class="support-label sage">선호</span><div id="overview-preferences" class="chip-list"></div></div>
+              <div class="support-block"><span class="support-label blue">효과적인 전략</span><div id="overview-strategies" class="chip-list"></div></div>
+              <div class="support-block"><span class="support-label sand">전환·안정 지원</span><div id="overview-supports" class="chip-list"></div></div>
+            </article>
+
+            <article class="card stat-card"><span class="stat-kicker">승인된 수업 기록</span><strong id="session-count">0</strong><button class="text-button" data-go="sessions" type="button">기록 보기 →</button></article>
+            <article class="card stat-card"><span class="stat-kicker">승인된 활동 계획</span><strong id="plan-count">0</strong><button class="text-button" data-go="plan" type="button">계획 보기 →</button></article>
+
+            <article class="card recent-card">
+              <div class="card-head"><div><p class="eyebrow">최근 기록</p><h3>최근 수업 기록</h3></div><button class="text-button" data-go="sessions" type="button">전체 보기</button></div>
+              <div id="recent-sessions" class="record-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-dossier" data-view="dossier" hidden>
+          <div class="section-heading"><div><p class="eyebrow">사람이 승인한 공식 기록</p><h2>지원 기록철</h2><p>사람이 확인하고 승인한 정보만 담는 이 기기의 공식 원본입니다.</p></div><span class="canonical-badge">이 기기의 공식 원본</span></div>
+          <div class="dossier-layout">
+            <article class="card identity-card"><p class="eyebrow">기본 정보</p><dl><div><dt>이름</dt><dd id="detail-name">–</dd></div><div><dt>연령대</dt><dd id="detail-age">–</dd></div><div><dt>의사소통 방식</dt><dd id="detail-communication">–</dd></div><div><dt>로컬 원본 ID</dt><dd><code id="detail-id">–</code></dd></div></dl></article>
+            <article class="card dossier-section"><div class="section-icon sage-bg">P</div><div><h3>확인된 선호</h3><p>활동 진입과 강화에 활용할 수 있는 자극</p><div id="detail-preferences" class="chip-list large"></div></div></article>
+            <article class="card dossier-section"><div class="section-icon rose-bg">A</div><div><h3>회피·주의 자극</h3><p>강도를 낮추거나 대체가 필요한 자극</p><div id="detail-avoidances" class="chip-list large"></div></div></article>
+            <article class="card dossier-section"><div class="section-icon blue-bg">S</div><div><h3>효과적인 지원 전략</h3><p>이미 도움이 된 것으로 확인된 접근</p><div id="detail-strategies" class="chip-list large"></div></div></article>
+            <article class="card dossier-section"><div class="section-icon sand-bg">T</div><div><h3>전환·안정 지원</h3><p>어려움이 보일 때 우선 적용하는 지원</p><div id="detail-supports" class="chip-list large"></div></div></article>
+            <article class="card dossier-section full"><div class="section-icon ink-bg">H</div><div><h3>인수인계 메모</h3><p>다음 담당자가 반드시 알아야 할 맥락</p><div id="detail-handoff" class="note-list"></div></div></article>
+            <article class="card dossier-section full"><div class="section-icon blue-bg">F</div><div><h3>승인된 얼굴 움직임 프로필</h3><p>승인된 수업 기록을 근거로 한 개인별 blendshape 규칙입니다. 감정·집중도·진단 라벨은 허용하지 않습니다.</p><div id="detail-facial-profiles" class="note-list"></div><button class="button button-quiet" id="new-facial-profile-button" type="button">움직임 프로필 승인</button></div></article>
+          </div>
+        </section>
+
+        <section class="view" id="view-sessions" data-view="sessions" hidden>
+          <div class="section-heading"><div><p class="eyebrow">승인된 기록</p><h2>수업 기록</h2><p>관찰한 사실과 교육자의 해석을 구분해서 남깁니다.</p></div><button class="button button-primary" data-action="new-session" type="button">새 수업 기록</button></div>
+          <div id="session-list" class="timeline"></div>
+        </section>
+
+        <section class="view" id="view-plan" data-view="plan" hidden>
+          <div class="section-heading"><div><p class="eyebrow">사람이 검토하고 승인하는 계획</p><h2>다음 활동</h2><p>지원 기록철을 근거로 초안을 만든 뒤, 담당자가 승인합니다.</p></div></div>
+          <div class="split-layout">
+            <article class="card form-card">
+              <div class="step-label">1 · 목표 입력</div>
+              <h3>활동 추천 초안 만들기</h3>
+              <form id="recommendation-form">
+                <label>이번 목표<textarea name="goal" required placeholder="예: 분류 활동에 5분 동안 참여하기"></textarea></label>
+                <label>보호자·교사 추가 입력<textarea name="caregiver_input" placeholder="예: 짧은 피드백이 있을 때 더 안정적으로 참여함"></textarea></label>
+                <label>초안 작성자<input name="drafted_by" required value="local-operator"></label>
+                <button class="button button-secondary full-button" type="submit">승인 전 초안 보기</button>
+              </form>
+              <div class="safety-inline"><strong>자동 저장 안 함</strong><span>초안은 승인하기 전까지 기록철에 반영되지 않습니다.</span></div>
+            </article>
+            <article class="card preview-card" id="recommendation-preview">
+              <div class="preview-placeholder"><div class="placeholder-lines"><i></i><i></i><i></i></div><h3>초안이 여기에 표시됩니다</h3><p>왼쪽에서 목표를 입력하면 근거와 제안 활동을 검토할 수 있습니다.</p></div>
+            </article>
+          </div>
+          <article class="card local-rag-card">
+            <div class="local-rag-head"><div><p class="eyebrow">허용된 로컬 자료만 검색</p><h3>로컬 데이터 검색·대화</h3><p>승인 기록과 metadata-backed 이벤트 영상 목록을 아동별로 검색합니다. raw 영상·얼굴 embedding·미승인 검토 내용은 RAG 문맥에 넣지 않습니다.</p></div><span id="local-rag-status" class="local-only-pill">연결 확인 중</span></div>
+            <form id="local-rag-form" class="local-rag-form">
+              <label class="rag-scope-label">검색 범위<select name="scope"><option value="all">승인 기록 + 이벤트 영상</option><option value="records">승인 기록만</option><option value="videos">이벤트 영상만</option></select></label>
+              <label class="rag-question-label">질문 또는 영상 검색어<textarea name="question" required maxlength="1000" placeholder="예: 입 주변 움직임이 세 번째로 반복된 영상과 당시 확인된 지원을 찾아줘"></textarea></label>
+              <div class="rag-form-actions"><button class="button button-secondary" type="submit">로컬에서 검색·대화</button><button class="button button-quiet" id="local-rag-reset" type="button">대화 지우기</button></div>
+            </form>
+            <div id="local-rag-result" class="local-rag-result"><p>질문을 입력하면 답, source ID와 일치하는 영상 링크를 표시합니다. 대화와 검색 vector는 영구 저장되지 않습니다.</p></div>
+          </article>
+          <div class="section-subheading"><div><p class="eyebrow">학습 프로그램</p><h3>구조화된 학습 프로그램</h3><p>시각 도입부터 기록까지 5단계 수업 흐름을 미리 봅니다.</p></div><button class="button button-quiet" id="learning-plan-button" type="button">현재 목표로 5단계 보기</button></div>
+          <div id="learning-plan" class="learning-steps"></div>
+          <div class="section-subheading history-heading"><div><p class="eyebrow">승인 이력</p><h3>승인된 활동 계획</h3></div></div>
+          <div id="approved-plans" class="plan-history"></div>
+        </section>
+
+        <section class="view" id="view-observation" data-view="observation" hidden>
+          <div class="section-heading"><div><p class="eyebrow">관찰은 보조 수단입니다</p><h2>관찰 보조</h2><p>진단이나 점수화가 아닌, 교사가 검토할 관찰 메모 초안을 만듅니다.</p></div><span class="draft-banner">기록철 자동 반영 없음</span></div>
+
+          <section class="rights-panel card" id="rights-panel" aria-labelledby="rights-title">
+            <div class="card-head"><div><p class="eyebrow">아동의 선택과 촬영 전 확인</p><h3 id="rights-title">촬영을 켜기 전에 함께 확인해 주세요</h3></div><span id="rights-ready-badge" class="status-pill locked">준비 안 됨</span></div>
+            <div id="rights-summary" class="rights-summary"></div>
+            <div class="rights-grid">
+              <form id="camera-consent-form" class="rights-form">
+                <h4>1. 서명 동의 확인</h4>
+                <p>서명 문구 자체는 저장하지 않고 확인용 해시만 이 기기에 남깁니다.</p>
+                <label>동의 목적<select name="purpose"><option value="camera_capture">카메라 촬영 및 현장 관찰</option><option value="research_metrics">연구 전용 표정·흥미·주의 지표 분석</option></select></label>
+                <label>보호자·법정대리인 이름<input name="signer_name" required></label>
+                <label>동의서 문서 번호<input name="consent_document_id" required placeholder="예: ONDAMM-CAM-001"></label>
+                <label>동의서 양식 버전<input name="form_version" required value="1.0"></label>
+                <label>확인 서명<input name="signature" required placeholder="동의 내용을 확인한 뒤 이름을 다시 입력"></label>
+                <label class="check-row"><input type="checkbox" name="guardian_consent_confirmed" required> 보호자 또는 법정대리인이 촬영에 동의했습니다.</label>
+                <label class="check-row"><input type="checkbox" name="subject_assent_confirmed" required> 아동에게 쉬운 말·그림으로 설명했고 지금 참여 의사를 확인했습니다.</label>
+                <button class="button button-secondary full-button" type="submit">선택한 목적의 동의 등록</button>
+              </form>
+              <div class="rights-form acclimation-box">
+                <h4>2. 카메라를 끄고 적응하기</h4>
+                <p>아동이 촬영 사실을 잊게 만드는 시간이 아닙니다. 카메라나 녹화 인형이 촬영 장치라는 점을 분명히 알려 주세요.</p>
+                <div class="timer" id="acclimation-timer">03:00</div>
+                <button class="button button-quiet full-button" id="acclimation-button" type="button">카메라가 꺼졌는지 확인하고 3분 시작</button>
+                <small id="acclimation-message">타이머가 끝난 뒤 교육 전 확인을 저장할 수 있습니다.</small>
+              </div>
+              <form id="pre-session-form" class="rights-form">
+                <h4>3. 교육 전 교차 확인</h4>
+                <label>보호자 교차 확인자<input name="guardian_cross_checker" required placeholder="보호자 이름"></label>
+                <label>교육 담당 교차 확인자<input name="educator_cross_checker" required placeholder="교육 담당자 이름"></label>
+                <input type="hidden" name="operator_id" value="pre-session-cross-check">
+                <label class="check-row"><input type="checkbox" name="explanation_confirmed" required> 아동이 이해하는 방식으로 촬영 목적을 설명했습니다.</label>
+                <label class="check-row"><input type="checkbox" name="recording_device_recognized" required> 아동이 카메라·녹화 인형을 촬영 장치로 알아보는지 확인했습니다.</label>
+                <label class="check-row"><input type="checkbox" name="camera_off_acclimation_completed" id="acclimation-confirmed" required disabled> 카메라를 끈 상태에서 3분 이상 편안하게 적응했습니다.</label>
+                <label class="check-row"><input type="checkbox" name="stop_control_practiced" required> 아동이 위의 ‘촬영 싫어요·중단’ 버튼을 직접 눌러 보았습니다.</label>
+                <label class="check-row"><input type="checkbox" name="subject_willing_now" required> 아동이 지금 촬영에 참여하겠다는 의사를 보였습니다.</label>
+                <label>확인 유효시간(분)<input name="valid_minutes" type="number" min="5" max="480" value="240"></label>
+                <button class="button button-primary full-button" type="submit">교육 전 확인 완료</button>
+              </form>
+            </div>
+          </section>
+          <div class="observation-layout">
+            <article class="camera-stage card">
+              <div class="camera-visual"><div class="focus-frame"><span></span><span></span><span></span><span></span></div><div class="silhouette"></div><div class="signal-line"><i></i><i></i><i></i></div></div>
+              <div class="camera-copy"><strong>안전한 데모 관찰</strong><span>실제 카메라를 켜지 않고 기존 관찰 초안 구조를 확인합니다.</span></div>
+              <form id="sensing-form">
+                <label>관찰 시간(초)<input name="duration_seconds" type="number" value="8" min="1" max="60"></label>
+                <label>선택적 음성 존재 메모<input name="audio_presence_note" placeholder="예: 짧은 발성이 들렸음"></label>
+                <button class="button button-primary" type="submit">데모 관찰 초안 만들기</button>
+              </form>
+              <p class="camera-note">huro headless 데모는 <code>--debug-preview</code>를 켠 뒤 SSH tunnel의 <code>http://127.0.0.1:8766</code>에서 확인합니다. 카메라는 runtime 한 프로세스만 엽니다.</p>
+            </article>
+            <article class="card sensing-result" id="sensing-result">
+              <div class="preview-placeholder"><span class="draft-stamp">초안</span><h3>관찰 전입니다</h3><p>결과는 임시 초안으로만 표시되고 공식 기록에는 들어가지 않습니다.</p></div>
+            </article>
+          </div>
+
+          <section class="pattern-memory-section" aria-labelledby="pattern-memory-title">
+            <div class="section-subheading pattern-memory-heading">
+              <div><p class="eyebrow">개인별 시간 흐름 패턴</p><h3 id="pattern-memory-title">개인별 반복 패턴 메모리</h3><p>1~2회는 수치 정보만 축적하고, 반복 기준을 넘은 현재 구간은 앞뒤 문맥을 포함한 제한 영상으로 검토합니다. 시간 흐름 인코더는 고정하고 사람이 승인한 기준 패턴만 추가합니다.</p></div>
+              <button class="button button-quiet" id="pattern-refresh-button" type="button">패턴 새로고침</button>
+            </div>
+            <div id="pattern-memory-workspace" class="pattern-memory-workspace">
+              <div class="card empty-inline">로컬 패턴 메모리를 불러오는 중입니다.</div>
+            </div>
+          </section>
+
+          <section class="clip-review-section" aria-labelledby="clip-review-title">
+            <div class="section-subheading clip-review-heading">
+              <div><p class="eyebrow">이 기기에서 움직임 검토</p><h3 id="clip-review-title">미세 움직임 이벤트 검토</h3><p>자동 저장된 앞뒤 문맥 포함 이벤트 영상을 재생하고, 움직인 부위·이전 발생 유사성·선정 이유를 확인한 뒤 교차 검토합니다.</p></div>
+              <button class="button button-quiet" id="clip-refresh-button" type="button">영상 목록 새로고침</button>
+            </div>
+            <div id="clip-review-workspace" class="clip-review-workspace">
+              <div class="card empty-inline">로컬 이벤트 영상을 불러오는 중입니다.</div>
+            </div>
+          </section>
+
+          <div class="boundary-grid"><div><strong>할 수 있는 것</strong><p>얼굴 존재, 대략적 시선 구역, 자세 쏠림, 얼굴 blendshape 기반 미세 움직임을 낮은 수준으로 요약</p></div><div><strong>하지 않는 것</strong><p>감정·집중도·순응도 점수, 진단, 좋아함/싫어함 자동 확정</p></div><div><strong>최종 결정</strong><p>보호자·교사·기관 사회복지사가 교차 검토하고 별도 승인한 내용만 수동 반영</p></div></div>
+        </section>
+
+        <section class="view" id="view-handoff" data-view="handoff" hidden>
+          <div class="section-heading"><div><p class="eyebrow">사람이 읽고 이어가는 지원</p><h2>인수인계</h2><p>다음 담당자가 읽고 새 환경에 수동으로 다시 작성할 자료를 만듭니다.</p></div></div>
+          <div class="handoff-grid">
+            <article class="card handoff-explainer"><div class="handoff-diagram"><span>현재 기록철</span><i>→</i><span>서명된 문서</span><i>→</i><span>사람이 읽고 재작성</span></div><h3>자동 가져오기가 아닙니다</h3><p>내보내기는 발급 시점의 읽기용 스냅샷과 무결성 증빙입니다. 받는 쪽 기록철을 덮어쓰거나 자동 합치지 않습니다.</p><ul><li>사람이 읽는 Markdown 문서</li><li>내용 해시와 HMAC 서명 manifest</li><li>지원 기록철에 감사 이벤트 남김</li></ul></article>
+            <article class="card export-card"><p class="eyebrow">서명된 내보내기</p><h3>인수인계 자료 만들기</h3><label>내보내는 담당자<input id="export-actor" value="local-operator"></label><button class="button button-primary full-button" id="export-button" type="button">서명된 인수인계 생성</button><div id="export-result" class="export-result"></div></article>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="create-dialog" class="dialog">
+    <form method="dialog" id="create-form">
+      <div class="dialog-head"><div><p class="eyebrow">새 로컬 지원 기록철</p><h2>지원 기록철 만들기</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
+      <p class="dialog-intro">처음에는 핵심 정보만 넣고, 확인된 내용부터 천천히 쌓아 가세요.</p>
+      <div class="form-grid">
+        <label>로컬 ID<input name="child_id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" placeholder="child-haneul"><small>영문, 숫자, -, _만 사용</small></label>
+        <label>표시 이름<input name="display_name" required placeholder="예: 하늘"></label>
+        <label>연령대<input name="age_band" required placeholder="예: 초등 저학년"></label>
+        <label>주요 의사소통 방식<input name="communication_modality" required placeholder="예: 시각 단서 + 짧은 구두 지시"></label>
+      </div>
+      <label>확인된 선호<textarea name="confirmed_preferences" placeholder="쉼표로 구분: 동물 카드, 퍼즐"></textarea></label>
+      <label>효과적인 전략<textarea name="effective_strategies" placeholder="쉼표로 구분: 한 번에 한 단계, 즉시 피드백"></textarea></label>
+      <label>전환·안정 지원<textarea name="triggers_and_calming_supports" placeholder="쉼표로 구분: 전환 10초 전 예고"></textarea></label>
+      <div class="dialog-actions"><button class="button button-quiet" value="cancel" type="button" data-close-dialog>취소</button><button class="button button-primary" type="submit">로컬 기록철 생성</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="session-dialog" class="dialog">
+    <form method="dialog" id="session-form">
+      <div class="dialog-head"><div><p class="eyebrow">승인된 수업 요약</p><h2>수업 기록 남기기</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
+      <div class="separation-note"><div><strong>관찰</strong><span>카드를 3회 선택함</span></div><i>≠</i><div><strong>해석</strong><span>시각 단서가 도움이 된 것으로 보임</span></div></div>
+      <div class="form-grid"><label>기록 제목<input name="title" required placeholder="동물 분류 활동 1회차"></label><label>활동명<input name="activity_name" required placeholder="동물 분류"></label></div>
+      <label>관찰한 반응<textarea name="observed_response" required placeholder="판단 없이 실제로 관찰한 행동을 적습니다."></textarea></label>
+      <label>교육자 해석<textarea name="educator_interpretation" required placeholder="관찰을 바탕으로 한 지원 관점의 해석을 적습니다."></textarea></label>
+      <div class="form-grid"><label>승인자<input name="approved_by" required value="local-operator"></label><label>태그<input name="tags" placeholder="쉼표로 구분"></label></div>
+      <div class="dialog-actions"><button class="button button-quiet" value="cancel" type="button" data-close-dialog>취소</button><button class="button button-primary" type="submit">승인 기록으로 저장</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="status-dialog" class="dialog compact-dialog">
+    <form method="dialog" id="status-form">
+      <div class="dialog-head"><div><p class="eyebrow">동의와 기록 상태</p><h2>동의·상태 관리</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
+      <div id="status-dialog-copy"></div>
+      <input type="hidden" name="status">
+      <label>처리자<input name="actor_id" required value="guardian-admin"></label>
+      <label>사유 코드<input name="reason_code" required></label>
+      <label>사유<textarea name="reason" required></textarea></label>
+      <div class="dialog-actions"><button class="button button-quiet" type="button" data-close-dialog>취소</button><button class="button button-danger" type="submit" id="status-submit">상태 변경</button></div>
+    </form>
+    <section id="purge-section" class="purge-section" hidden>
+      <h3>철회된 자료 실제 삭제</h3>
+      <p>먼저 삭제될 자료만 확인합니다. 미리보기만으로는 아무것도 삭제되지 않습니다.</p>
+      <button class="button button-quiet full-button" id="purge-preview-button" type="button">삭제 대상 미리보기</button>
+      <div id="purge-preview"></div>
+    </section>
+  </dialog>
+
+  <dialog id="facial-profile-dialog" class="dialog">
+    <form method="dialog" id="facial-profile-form">
+      <div class="dialog-head"><div><p class="eyebrow">APPROVED MOVEMENT PROFILE</p><h2>얼굴 움직임 프로필 승인</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="닫기">×</button></div>
+      <p class="dialog-intro">먼저 수업 기록에서 반복 관찰을 승인한 다음 해당 session ID를 근거로 연결하세요. 감정이나 진단을 학습하지 않고 관찰 가능한 blendshape 규칙만 조정합니다.</p>
+      <div class="form-grid"><label>규칙 ID<input name="label" required pattern="[A-Za-z0-9_-]+" placeholder="lip_corner_pull"></label><label>표시 이름<input name="display_name" required placeholder="입꼬리 당김 움직임"></label></div>
+      <label>MediaPipe blendshape 이름<textarea name="blendshape_names" required placeholder="mouthDimpleLeft, mouthDimpleRight"></textarea></label>
+      <div class="form-grid"><label>결합 방식<select name="aggregation"><option value="mean">양쪽 평균</option><option value="max">한쪽 최대</option><option value="min">양쪽 최소</option></select></label><label>활성 임계값<input name="activation_threshold" required type="number" min="0.05" max="0.95" step="0.01" value="0.35"></label></div>
+      <label>근거 수업 기록 session ID<textarea name="source_session_ids" required placeholder="쉼표로 구분"></textarea></label>
+      <label>승인자<input name="approved_by" required value="local-operator"></label>
+      <div class="dialog-actions"><button class="button button-quiet" value="cancel" type="button" data-close-dialog>취소</button><button class="button button-primary" type="submit">검토한 프로필 승인</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
