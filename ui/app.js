@@ -18,6 +18,7 @@ const state = {
   patternBusy: null,
   rights: null,
   acclimationCompleted: false,
+  camera: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -137,6 +138,191 @@ async function loadPatternMemory({ silent = false } = {}) {
   }
 }
 
+async function loadCameraStatus({ silent = false } = {}) {
+  if (!state.current) {
+    state.camera = null;
+    return;
+  }
+
+  try {
+    state.camera = await api(
+      `/api/dossiers/${encodeURIComponent(state.current.child_id)}/camera/status`
+    );
+  } catch (error) {
+    state.camera = null;
+    if (!silent) toast(error.message, "error");
+  }
+}
+
+function renderCameraPanel() {
+  if (!state.current) return;
+
+  const camera = state.camera || {};
+  const rights = state.rights || {};
+  const cameraConsent = rights.purposes?.camera_capture;
+
+  const ready = Boolean(
+    rights.pre_session_ready
+    && cameraConsent?.active
+    && !rights.child_stop_active
+    && state.current.canonical_status === "active"
+  );
+
+  const running = Boolean(camera.running);
+  const busy = Boolean(camera.busy_by_other_child);
+  const recording = Boolean(camera.event_recording);
+
+  const streamBadge = $("#camera-stream-status");
+  const recordingBadge = $("#camera-recording-status");
+  const stream = $("#camera-live-stream");
+  const placeholder = $("#camera-live-placeholder");
+
+  const startButton = $("#camera-start-button");
+  const eventButton = $("#camera-event-button");
+  const stopButton = $("#camera-stop-button");
+  const cameraIndex = $("#live-camera-index");
+
+  startButton.disabled = !ready || running || busy;
+  eventButton.disabled = !running;
+  stopButton.disabled = !running;
+  cameraIndex.disabled = running;
+
+  streamBadge.textContent = running
+    ? "● STREAMING"
+    : (busy ? "CAMERA BUSY" : "STREAM OFF");
+
+  streamBadge.className = `camera-status-badge ${running ? "streaming" : "stopped"}`;
+
+  recordingBadge.textContent = recording
+    ? "● EVENT RECORDING ON"
+    : "EVENT RECORDING OFF";
+
+  recordingBadge.className = `camera-status-badge ${recording ? "recording-on" : "recording-off"}`;
+
+  eventButton.textContent = recording
+    ? "이벤트 녹화 OFF"
+    : "이벤트 녹화 ON";
+
+  eventButton.classList.toggle(
+    "button-danger",
+    recording,
+  );
+
+  eventButton.classList.toggle(
+    "button-secondary",
+    !recording,
+  );
+
+  if (running) {
+    const streamChild = state.current.child_id;
+
+    if (
+      stream.dataset.childId !== streamChild
+      || !stream.getAttribute("src")
+    ) {
+      stream.dataset.childId = streamChild;
+
+      stream.src =
+        `/api/dossiers/${encodeURIComponent(streamChild)}/camera/stream.mjpg?t=${Date.now()}`;
+    }
+
+    stream.hidden = false;
+    placeholder.hidden = true;
+  } else {
+    stream.removeAttribute("src");
+    delete stream.dataset.childId;
+
+    stream.hidden = true;
+    placeholder.hidden = false;
+
+    const message = busy
+      ? `다른 지원 대상(${camera.active_child_id || "-"})의 카메라가 실행 중입니다.`
+      : (
+          camera.error
+            ? `카메라 오류: ${camera.error}`
+            : (
+                ready
+                  ? "카메라 시작을 누르면 stream만 시작됩니다."
+                  : "촬영 동의와 교육 전 권리 확인을 먼저 완료하세요."
+              )
+        );
+
+    placeholder.innerHTML = `
+      <strong>${busy ? "카메라 사용 중" : "카메라가 꺼져 있습니다"}</strong>
+      <span>${escapeHtml(message)}</span>`;
+  }
+
+  $("#camera-runtime-state").textContent =
+    String(camera.state || "stopped").toUpperCase();
+
+  let temporalState = "-";
+
+  if (running) {
+    if (!camera.calibration_ready) {
+      temporalState = "CALIBRATING";
+    } else if (camera.warming_up) {
+      temporalState =
+        `WARMING ${camera.warmup_frames || 0}/${camera.warmup_required_frames || 60}`;
+    } else {
+      temporalState = "READY";
+    }
+  }
+
+  $("#camera-temporal-state").textContent =
+    temporalState;
+
+  $("#camera-pattern-count").textContent =
+    `${camera.occurrence_count || 0} / ${camera.occurrence_threshold || 3}`;
+
+  $("#camera-candidate-id").textContent =
+    camera.candidate_id
+    || camera.pattern_id
+    || "-";
+
+  const details = [];
+
+  if (camera.metric_enabled) {
+    details.push(
+      `32D child metric · ${camera.metric_checkpoint || "metric_head.pt"}`
+    );
+  } else if (running) {
+    details.push(
+      `${camera.embedding_dimension || 64}D temporal embedding`
+    );
+  }
+
+  if (camera.lifecycle) {
+    details.push(
+      `lifecycle=${camera.lifecycle}`
+    );
+  }
+
+  if (
+    typeof camera.motion_score === "number"
+  ) {
+    details.push(
+      `motion z=${camera.motion_score.toFixed(2)}`
+    );
+  }
+
+  if (camera.event_saved) {
+    details.push(
+      "EVENT SAVED"
+    );
+  }
+
+  if (camera.session_id) {
+    details.push(
+      `session=${camera.session_id}`
+    );
+  }
+
+  $("#camera-runtime-detail").textContent =
+    details.length
+      ? details.join(" · ")
+      : "카메라를 시작하면 calibration과 temporal warm-up 상태가 표시됩니다.";
+}
+
 async function selectChild(childId) {
   state.current = await api(`/api/dossiers/${encodeURIComponent(childId)}`);
   state.rights = await api(`/api/dossiers/${encodeURIComponent(childId)}/rights`);
@@ -160,6 +346,7 @@ async function selectChild(childId) {
   await loadLocalClips({ preserveSelection: false, silent: true });
   await loadEventReviews({ silent: true });
   await loadPatternMemory({ silent: true });
+  await loadCameraStatus({ silent: true });
   renderChildList();
   renderCurrent();
   document.body.classList.remove("sidebar-open");
@@ -233,6 +420,7 @@ function renderCurrent() {
   renderClipReview();
   renderPatternMemory();
   renderRights();
+  renderCameraPanel();
   $("#export-result").innerHTML = "";
   setTab(state.tab);
 }
@@ -939,6 +1127,100 @@ $("#clip-review-workspace").addEventListener("submit", async (event) => {
   }
 });
 
+$("#camera-start-button").addEventListener("click", async () => {
+  if (!state.current) return;
+
+  const cameraIndex = Number(
+    $("#live-camera-index").value
+  );
+
+  try {
+    state.camera = await api(
+      `/api/dossiers/${encodeURIComponent(state.current.child_id)}/camera/start`,
+      {
+        method: "POST",
+        body: {
+          camera: cameraIndex,
+          width: 1280,
+          height: 720,
+        },
+      },
+    );
+
+    renderCameraPanel();
+
+    toast(
+      "카메라 stream을 시작했습니다. 이벤트 영상 저장은 아직 OFF입니다."
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#camera-event-button").addEventListener("click", async () => {
+  if (!state.current || !state.camera?.running) return;
+
+  const enabled = !Boolean(
+    state.camera.event_recording
+  );
+
+  try {
+    state.camera = await api(
+      `/api/dossiers/${encodeURIComponent(state.current.child_id)}/camera/event-recording`,
+      {
+        method: "POST",
+        body: {
+          enabled,
+        },
+      },
+    );
+
+    renderCameraPanel();
+
+    toast(
+      enabled
+        ? "이벤트 녹화를 켰습니다. 전체 세션이 아니라 반복 이벤트 clip만 저장합니다."
+        : "이벤트 녹화를 껐습니다. stream과 temporal 분석은 계속됩니다."
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#camera-stop-button").addEventListener("click", async () => {
+  if (!state.current) return;
+
+  try {
+    state.camera = await api(
+      `/api/dossiers/${encodeURIComponent(state.current.child_id)}/camera/stop`,
+      {
+        method: "POST",
+        body: {},
+      },
+    );
+
+    renderCameraPanel();
+
+    await loadLocalClips({
+      preserveSelection: true,
+      silent: true,
+    });
+
+    await loadPatternMemory({
+      silent: true,
+    });
+
+    renderClipReview();
+    renderPatternMemory();
+
+    toast(
+      "카메라 stream을 종료했습니다."
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
 $("#sensing-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
@@ -1043,7 +1325,14 @@ $("#child-stop-button").addEventListener("click", async () => {
     });
     state.current.subject_refusal_active = true;
     renderRights();
-    toast("촬영 중단 요청을 보냈습니다. 실행 중인 카메라는 곧 멈춥니다.", "error");
+
+    await loadCameraStatus({
+      silent: true,
+    });
+
+    renderCameraPanel();
+
+    toast("촬영 중단 요청을 보냈습니다. 카메라와 이벤트 저장을 중단했습니다.", "error");
   } catch (error) { toast(error.message, "error"); }
 });
 
@@ -1111,6 +1400,16 @@ $("#pre-session-form").addEventListener("submit", async (event) => {
   toast("교육 전 권리 확인을 마쳤습니다. 유효시간 동안만 촬영을 시작할 수 있습니다.");
   await refreshAfterSuccessfulMutation("observation");
 });
+
+window.setInterval(async () => {
+  if (!state.current) return;
+
+  await loadCameraStatus({
+    silent: true,
+  });
+
+  renderCameraPanel();
+}, 1000);
 
 loadDossiers().catch((error) => {
   console.error(error);

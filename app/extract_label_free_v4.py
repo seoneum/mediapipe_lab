@@ -1126,6 +1126,33 @@ def extract_video(
         in labels.iterrows()
     }
 
+    # Prefer the real wall-clock capture timestamps emitted by the
+    # recording program. Container FPS can be wrong on AVFoundation
+    # (for example, a ~28 FPS capture may be tagged as 15 FPS).
+    #
+    # The fallback preserves compatibility with older recordings that
+    # do not contain capture_timestamp_ms.
+    capture_timestamp_lookup = {}
+
+    if "capture_timestamp_ms" in labels.columns:
+        capture_times = pd.to_numeric(
+            labels["capture_timestamp_ms"],
+            errors="coerce",
+        )
+
+        for frame_value, timestamp_value in zip(
+            labels["frame_idx"],
+            capture_times,
+        ):
+            if np.isfinite(timestamp_value):
+                capture_timestamp_lookup[
+                    int(frame_value)
+                ] = int(
+                    round(
+                        float(timestamp_value)
+                    )
+                )
+
     cap = cv2.VideoCapture(
         str(video_path)
     )
@@ -1423,13 +1450,20 @@ def extract_video(
             ):
                 break
 
-            timestamp_ms = int(
-                round(
+            timestamp_ms = (
+                capture_timestamp_lookup.get(
                     frame_idx
-                    / fps
-                    * 1000.0
                 )
             )
+
+            if timestamp_ms is None:
+                timestamp_ms = int(
+                    round(
+                        frame_idx
+                        / fps
+                        * 1000.0
+                    )
+                )
 
             time_s = (
                 timestamp_ms

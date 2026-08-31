@@ -317,6 +317,20 @@ class LocalEventClipRecorder:
             del self._pending_events[event_id]
         return completed
 
+    def set_persist_enabled(self, enabled: bool) -> None:
+        """Enable/disable event persistence without stopping RAM buffering."""
+        enabled = bool(enabled)
+
+        self.persist_enabled = enabled
+
+        # Backward-compatible public flag.
+        self.recording_enabled = enabled
+
+        if not enabled:
+            # Persistence was explicitly disabled.
+            # Pending clips must not be written later.
+            self._pending_events.clear()
+
     @property
     def buffered_frame_count(self) -> int:
         return len(self._frames)

@@ -194,6 +194,60 @@
               </form>
             </div>
           </section>
+          <section class="live-camera-card card" id="live-camera-panel">
+            <div class="live-camera-head">
+              <div>
+                <p class="eyebrow">LOCAL LIVE CAMERA</p>
+                <h3>실시간 미세 움직임 관찰</h3>
+                <p>전체 세션 영상은 저장하지 않습니다. 카메라 stream과 분석은 계속 실행되고, 이벤트 녹화를 켠 동안 반복 기준을 만족한 짧은 이벤트만 저장됩니다.</p>
+              </div>
+              <div class="live-status-stack">
+                <span class="camera-status-badge stopped" id="camera-stream-status">STREAM OFF</span>
+                <span class="camera-status-badge recording-off" id="camera-recording-status">EVENT RECORDING OFF</span>
+              </div>
+            </div>
+
+            <div class="live-camera-grid">
+              <div class="live-preview-shell">
+                <img id="camera-live-stream" class="camera-live-stream" alt="ON DAMM 실시간 카메라" hidden>
+                <div id="camera-live-placeholder" class="camera-live-placeholder">
+                  <strong>카메라가 꺼져 있습니다</strong>
+                  <span>교육 전 권리 확인을 마친 뒤 ‘카메라 시작’을 누르세요.</span>
+                </div>
+              </div>
+
+              <div class="live-camera-side">
+                <div class="camera-runtime-metrics">
+                  <div><span>상태</span><strong id="camera-runtime-state">STOPPED</strong></div>
+                  <div><span>Temporal</span><strong id="camera-temporal-state">-</strong></div>
+                  <div><span>패턴 일치</span><strong id="camera-pattern-count">0 / 3</strong></div>
+                  <div><span>현재 후보</span><strong id="camera-candidate-id">-</strong></div>
+                </div>
+
+                <label class="camera-index-label">
+                  카메라 번호
+                  <input id="live-camera-index" type="number" min="0" max="8" value="0">
+                </label>
+
+                <div class="camera-control-buttons">
+                  <button class="button button-primary" id="camera-start-button" type="button">카메라 시작</button>
+                  <button class="button button-secondary" id="camera-event-button" type="button" disabled>이벤트 녹화 ON</button>
+                  <button class="button button-danger" id="camera-stop-button" type="button" disabled>카메라 종료</button>
+                </div>
+
+                <div class="camera-policy-note">
+                  <strong>저장 정책</strong>
+                  <span>STREAM ON만으로는 전체 영상을 저장하지 않습니다.</span>
+                  <span>EVENT RECORDING ON일 때도 반복 후보로 선택된 bounded event clip만 저장합니다.</span>
+                </div>
+
+                <div class="camera-runtime-detail" id="camera-runtime-detail">
+                  카메라를 시작하면 calibration과 temporal warm-up 상태가 표시됩니다.
+                </div>
+              </div>
+            </div>
+          </section>
+
           <div class="observation-layout">
             <article class="camera-stage card">
               <div class="camera-visual"><div class="focus-frame"><span></span><span></span><span></span><span></span></div><div class="silhouette"></div><div class="signal-line"><i></i><i></i><i></i></div></div>

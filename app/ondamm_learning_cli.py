@@ -103,6 +103,24 @@ def resolve_temporal_checkpoint(value: str | None) -> Path | None:
     return product.resolve() if product.is_file() else None
 
 
+def resolve_temporal_metric_checkpoint(
+    value: str | None,
+) -> Path | None:
+    if not value:
+        return None
+
+    path = Path(
+        value
+    ).expanduser().resolve()
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing --temporal-metric-checkpoint: {path}"
+        )
+
+    return path
+
+
 def deterministic_demo_started_at() -> str:
     return "2026-01-01T00:00:00+00:00"
 
@@ -640,6 +658,14 @@ def main() -> None:
         "--temporal-checkpoint",
         help="Explicit frozen causal TCN checkpoint; default is only encoder_product.pt",
     )
+    parser.add_argument(
+        "--temporal-metric-checkpoint",
+        help=(
+            "Optional child-specific metric head. "
+            "When provided, runtime uses child-normalized "
+            "64D TCN -> metric projection embedding."
+        ),
+    )
     parser.add_argument("--no-temporal", action="store_true", help="Disable temporal pattern discovery even if a checkpoint exists")
     parser.add_argument("--require-temporal", action="store_true", help="Fail instead of falling back when no temporal checkpoint exists")
     parser.add_argument("--pattern-memory-root", default=str(ONDAMM_EXPORTS / "pattern-memory"))
@@ -654,7 +680,16 @@ def main() -> None:
     parser.add_argument("--temporal-refractory-seconds", type=float, default=0.5)
     parser.add_argument("--temporal-min-occurrences", type=int, default=3)
     parser.add_argument("--temporal-strong-occurrences", type=int, default=5)
-    parser.add_argument("--temporal-candidate-distance-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--temporal-candidate-distance-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Override candidate distance threshold. "
+            "If omitted with a child metric checkpoint, "
+            "use the R3-selected metric threshold."
+        ),
+    )
     parser.add_argument("--temporal-pre-seconds", type=float, default=3.0)
     parser.add_argument("--temporal-post-seconds", type=float, default=3.0)
     parser.add_argument("--review-width", type=int, default=960)
@@ -707,8 +742,16 @@ def main() -> None:
         raise ValueError("--temporal-min-occurrences must be at least two")
     if args.temporal_strong_occurrences < args.temporal_min_occurrences:
         raise ValueError("--temporal-strong-occurrences must be >= --temporal-min-occurrences")
-    if not 0 < args.temporal_candidate_distance_threshold <= 2:
-        raise ValueError("--temporal-candidate-distance-threshold must be in (0, 2]")
+    if (
+        args.temporal_candidate_distance_threshold is not None
+        and not 0
+        < args.temporal_candidate_distance_threshold
+        <= 2
+    ):
+        raise ValueError(
+            "--temporal-candidate-distance-threshold "
+            "must be in (0, 2]"
+        )
     if args.temporal_pre_seconds < 0 or args.temporal_post_seconds < 0:
         raise ValueError("temporal clip pre/post seconds must be non-negative")
     if args.review_width <= 0 or args.review_height <= 0 or args.review_buffer_fps <= 0:
@@ -745,7 +788,15 @@ def main() -> None:
     detector = SustainedEventDetector(policy=policy)
     temporal_demo = None
     if not args.demo and not args.no_temporal:
-        checkpoint = resolve_temporal_checkpoint(args.temporal_checkpoint)
+        checkpoint = resolve_temporal_checkpoint(
+            args.temporal_checkpoint
+        )
+
+        metric_checkpoint = (
+            resolve_temporal_metric_checkpoint(
+                args.temporal_metric_checkpoint
+            )
+        )
         if checkpoint is None:
             message = (
                 "No temporal encoder checkpoint found. Skeleton/rule preview remains available, "
@@ -762,6 +813,7 @@ def main() -> None:
                 child_id=dossier.child_id,
                 session_id=output_dir.name,
                 checkpoint_path=checkpoint,
+                metric_checkpoint_path=metric_checkpoint,
                 pattern_memory_root=Path(args.pattern_memory_root),
                 clips_dir=clips_dir,
                 event_metadata_path=output_dir / "event_recording.json",

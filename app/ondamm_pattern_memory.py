@@ -307,7 +307,10 @@ class PatternMemoryStore:
                     "distance_mean": 0.0,
                     "distance_m2": 0.0,
                     "recommended_distance_threshold": round(
-                        min(0.05, self.policy.known_distance_threshold),
+                        min(
+                            self.policy.candidate_distance_threshold,
+                            self.policy.known_distance_threshold,
+                        ),
                         6,
                     ),
                     "movement_profile": self._movement_distribution(movement_summary),
@@ -555,7 +558,17 @@ class PatternMemoryStore:
         # The policy value is a safety ceiling, not the value applied to every
         # child.  The small floor supports near-identical approved exemplars.
         learned = mean + 2.0 * math.sqrt(variance) + 0.02
-        return round(float(np.clip(learned, 0.05, self.policy.known_distance_threshold)), 6)
+
+        return round(
+            float(
+                np.clip(
+                    learned,
+                    self.policy.candidate_distance_threshold,
+                    self.policy.known_distance_threshold,
+                )
+            ),
+            6,
+        )
 
     @staticmethod
     def _movement_distribution(movement_summary: Mapping[str, Any] | None) -> dict[str, float] | None:

@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from ondamm_cli import render_handoff_markdown
+from ondamm_camera_session import CameraSessionManager
 from ondamm_learning import build_learning_program_plan
 from ondamm_gpt import OpenAIFrameReviewer, extract_video_frame_data_urls
 from ondamm_ollama import OllamaClient, OllamaDossierRag, OllamaFrameReviewer
@@ -107,6 +108,7 @@ class OndammWebService:
         rag_assistant: Any | None = None,
         frame_extractor: Callable[[Path], list[str]] = extract_video_frame_data_urls,
         pattern_memory_root: Path | None = None,
+        camera_manager: CameraSessionManager | None = None,
     ) -> None:
         self.clip_catalog = clip_catalog or LocalClipCatalog(Path(ondamm_paths.ONDAMM_EXPORTS))
         self.event_review_store = event_review_store or EventReviewStore(
@@ -117,6 +119,14 @@ class OndammWebService:
         self.pattern_memory_root = (
             pattern_memory_root or (Path(ondamm_paths.ONDAMM_EXPORTS) / "pattern-memory")
         ).expanduser().resolve()
+
+        self.camera_manager = (
+            camera_manager
+            or CameraSessionManager(
+                project_root=Path(__file__).resolve().parents[1],
+                pattern_memory_root=self.pattern_memory_root,
+            )
+        )
         self._browser_media_cache: dict[str, Path] = {}
         self.rag_assistant = rag_assistant
         self.ollama_model_status: dict[str, Any] | None = None
@@ -768,7 +778,125 @@ class OndammWebService:
             "subject_refusal_activated", "child-stop-control", {"reason": dossier.subject_refusal_reason}
         )
         save_dossier(dossier)
+
+        try:
+            self.camera_manager.stop(
+                child_id=dossier.child_id,
+                discard=True,
+            )
+        except RuntimeError:
+            pass
+
         return rights_summary(dossier)
+
+    def camera_status(
+        self,
+        child_id: str,
+    ) -> dict[str, Any]:
+        child_id = self._validate_child_id(
+            child_id
+        )
+
+        return self.camera_manager.status(
+            child_id
+        )
+
+    def start_camera(
+        self,
+        child_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        child_id = self._validate_child_id(
+            child_id
+        )
+
+        dossier = load_dossier(
+            child_id
+        )
+
+        ensure_active(
+            dossier,
+            "start live camera",
+        )
+
+        try:
+            camera = int(
+                payload.get(
+                    "camera",
+                    0,
+                )
+            )
+
+            width = int(
+                payload.get(
+                    "width",
+                    1280,
+                )
+            )
+
+            height = int(
+                payload.get(
+                    "height",
+                    720,
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ValidationError(
+                "camera/width/height must be integers"
+            ) from exc
+
+        return self.camera_manager.start(
+            child_id=child_id,
+            camera=camera,
+            width=width,
+            height=height,
+        )
+
+    def set_camera_event_recording(
+        self,
+        child_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        child_id = self._validate_child_id(
+            child_id
+        )
+
+        enabled = payload.get(
+            "enabled"
+        )
+
+        if not isinstance(
+            enabled,
+            bool,
+        ):
+            raise ValidationError(
+                "enabled must be true or false"
+            )
+
+        return (
+            self.camera_manager
+            .set_event_recording(
+                child_id=child_id,
+                enabled=enabled,
+            )
+        )
+
+    def stop_camera(
+        self,
+        child_id: str,
+    ) -> dict[str, Any]:
+        child_id = self._validate_child_id(
+            child_id
+        )
+
+        return self.camera_manager.stop(
+            child_id=child_id,
+            discard=False,
+        )
 
     def preview_purge(self, child_id: str) -> dict[str, object]:
         return preview_purge(self._validate_child_id(child_id))
@@ -897,6 +1025,14 @@ class ApiRouter:
                 return 201, self.service.export_handoff(child_id, body)
             if len(segments) == 4 and segments[3] == "status" and method == "POST":
                 return 200, self.service.change_status(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["camera", "status"] and method == "GET":
+                return 200, self.service.camera_status(child_id)
+            if len(segments) == 5 and segments[3:] == ["camera", "start"] and method == "POST":
+                return 200, self.service.start_camera(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["camera", "event-recording"] and method == "POST":
+                return 200, self.service.set_camera_event_recording(child_id, body)
+            if len(segments) == 5 and segments[3:] == ["camera", "stop"] and method == "POST":
+                return 200, self.service.stop_camera(child_id)
             if len(segments) == 4 and segments[3] == "rights" and method == "GET":
                 return 200, self.service.get_rights(child_id)
             if len(segments) == 5 and segments[3:] == ["rights", "consents"] and method == "POST":
@@ -923,6 +1059,23 @@ def make_http_handler(router: ApiRouter, ui_dir: Path) -> type[BaseHTTPRequestHa
 
         def do_GET(self) -> None:  # noqa: N802
             request_path = urlparse(self.path).path
+
+            stream_segments = [
+                unquote(segment)
+                for segment in request_path.split("/")
+                if segment
+            ]
+
+            if (
+                len(stream_segments) == 5
+                and stream_segments[:2] == ["api", "dossiers"]
+                and stream_segments[3:] == ["camera", "stream.mjpg"]
+            ):
+                self._serve_camera_stream(
+                    stream_segments[2]
+                )
+                return
+
             if request_path.startswith("/media/clips/"):
                 self._serve_clip_media(unquote(request_path.removeprefix("/media/clips/")))
                 return
@@ -971,6 +1124,103 @@ def make_http_handler(router: ApiRouter, ui_dir: Path) -> type[BaseHTTPRequestHa
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(content)
+
+        def _serve_camera_stream(
+            self,
+            child_id: str,
+        ) -> None:
+            try:
+                initial = (
+                    router.service
+                    .camera_manager
+                    .status(child_id)
+                )
+
+                if not initial.get(
+                    "running"
+                ):
+                    self.send_error(404)
+                    return
+
+                boundary = "ondamm-frame"
+
+                self.send_response(200)
+
+                self.send_header(
+                    "Content-Type",
+                    (
+                        "multipart/x-mixed-replace; "
+                        f"boundary={boundary}"
+                    ),
+                )
+
+                self.send_header(
+                    "Cache-Control",
+                    "no-store, no-cache, must-revalidate",
+                )
+
+                self.send_header(
+                    "Pragma",
+                    "no-cache",
+                )
+
+                self.end_headers()
+
+                sequence = 0
+
+                while True:
+                    packet = (
+                        router.service
+                        .camera_manager
+                        .wait_for_jpeg(
+                            child_id=child_id,
+                            after_sequence=sequence,
+                            timeout=1.0,
+                        )
+                    )
+
+                    if packet is None:
+                        status = (
+                            router.service
+                            .camera_manager
+                            .status(child_id)
+                        )
+
+                        if not status.get(
+                            "running"
+                        ):
+                            break
+
+                        continue
+
+                    sequence, jpeg = packet
+
+                    header = (
+                        f"--{boundary}\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(jpeg)}\r\n"
+                        "\r\n"
+                    ).encode("ascii")
+
+                    self.wfile.write(
+                        header
+                    )
+
+                    self.wfile.write(
+                        jpeg
+                    )
+
+                    self.wfile.write(
+                        b"\r\n"
+                    )
+
+                    self.wfile.flush()
+
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+            ):
+                return
 
         def _serve_clip_media(self, clip_id: str) -> None:
             try:
@@ -1057,8 +1307,26 @@ def main() -> None:
 
     project_root = Path(__file__).resolve().parents[1]
     ui_dir = Path(args.ui_dir).expanduser().resolve() if args.ui_dir else project_root / "ui"
-    handler = make_http_handler(ApiRouter(OndammWebService()), ui_dir)
-    server = ThreadingHTTPServer((args.host, args.port), handler)
+    live_pattern_root = (
+        project_root
+        / "outputs"
+        / "ondamm"
+        / "pattern-memory-metric-live-v1"
+    )
+
+    service = OndammWebService(
+        pattern_memory_root=live_pattern_root
+    )
+
+    handler = make_http_handler(
+        ApiRouter(service),
+        ui_dir,
+    )
+
+    server = ThreadingHTTPServer(
+        (args.host, args.port),
+        handler,
+    )
     print(f"ON DAMM UI: http://{args.host}:{args.port}")
     print("Local-first server. Stop with Ctrl+C.")
     try:
@@ -1066,6 +1334,9 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        service.camera_manager.stop_any(
+            discard=True
+        )
         server.server_close()
 
 

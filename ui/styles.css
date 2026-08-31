@@ -566,3 +566,403 @@ body.locked .button-primary:not(#status-submit), body.locked [data-action="new-s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
+
+/* =========================================================
+   Live camera / event-only recording
+   ========================================================= */
+
+.live-camera-card {
+  margin-bottom: 24px;
+}
+
+.live-camera-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.live-camera-head h3 {
+  margin: 3px 0 6px;
+}
+
+.live-camera-head p {
+  margin-bottom: 0;
+}
+
+.live-status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.camera-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 31px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.camera-status-badge.stopped {
+  background: #edf0ef;
+  color: #66706d;
+}
+
+.camera-status-badge.streaming {
+  background: #dff6ee;
+  color: #176b55;
+}
+
+.camera-status-badge.recording-off {
+  background: #f1f2f1;
+  color: #646a68;
+}
+
+.camera-status-badge.recording-on {
+  background: #fee7e4;
+  color: #a43a31;
+}
+
+.live-camera-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.7fr);
+  gap: 18px;
+}
+
+.live-preview-shell {
+  position: relative;
+  overflow: hidden;
+  min-height: 420px;
+  border-radius: 18px;
+  background: #0d1516;
+  border: 1px solid rgba(41, 85, 75, 0.16);
+}
+
+.camera-live-stream {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  object-fit: contain;
+  background: #0c1214;
+}
+
+.camera-live-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+  color: #71807b;
+}
+
+.camera-live-placeholder strong {
+  color: #344740;
+  font-size: 18px;
+}
+
+.live-camera-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.camera-runtime-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.camera-runtime-metrics > div {
+  border: 1px solid rgba(42, 76, 68, 0.12);
+  border-radius: 12px;
+  padding: 11px;
+  background: #f8faf9;
+}
+
+.camera-runtime-metrics span {
+  display: block;
+  color: #74807c;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.camera-runtime-metrics strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #203c35;
+  font-size: 13px;
+}
+
+.camera-index-label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.camera-index-label input {
+  max-width: 110px;
+}
+
+.camera-control-buttons {
+  display: grid;
+  gap: 8px;
+}
+
+.camera-policy-note {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f1f7f5;
+  color: #50645e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.camera-policy-note strong {
+  color: #204b40;
+}
+
+.camera-runtime-detail {
+  min-height: 58px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: #111b1c;
+  color: #b9d2ca;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 980px) {
+  .live-camera-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .live-camera-head {
+    flex-direction: column;
+  }
+
+  .live-status-stack {
+    justify-content: flex-start;
+  }
+
+  .live-preview-shell,
+  .camera-live-stream {
+    min-height: 300px;
+  }
+}
+
+/* =========================================================
+   Live camera / event-only recording
+   ========================================================= */
+
+.live-camera-card {
+  margin-bottom: 24px;
+}
+
+.live-camera-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.live-camera-head h3 {
+  margin: 3px 0 6px;
+}
+
+.live-camera-head p {
+  margin-bottom: 0;
+}
+
+.live-status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.camera-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 31px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.camera-status-badge.stopped {
+  background: #edf0ef;
+  color: #66706d;
+}
+
+.camera-status-badge.streaming {
+  background: #dff6ee;
+  color: #176b55;
+}
+
+.camera-status-badge.recording-off {
+  background: #f1f2f1;
+  color: #646a68;
+}
+
+.camera-status-badge.recording-on {
+  background: #fee7e4;
+  color: #a43a31;
+}
+
+.live-camera-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.7fr);
+  gap: 18px;
+}
+
+.live-preview-shell {
+  position: relative;
+  overflow: hidden;
+  min-height: 420px;
+  border-radius: 18px;
+  background: #0d1516;
+  border: 1px solid rgba(41, 85, 75, 0.16);
+}
+
+.camera-live-stream {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  object-fit: contain;
+  background: #0c1214;
+}
+
+.camera-live-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+  color: #71807b;
+}
+
+.camera-live-placeholder strong {
+  color: #344740;
+  font-size: 18px;
+}
+
+.live-camera-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.camera-runtime-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.camera-runtime-metrics > div {
+  border: 1px solid rgba(42, 76, 68, 0.12);
+  border-radius: 12px;
+  padding: 11px;
+  background: #f8faf9;
+}
+
+.camera-runtime-metrics span {
+  display: block;
+  color: #74807c;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.camera-runtime-metrics strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #203c35;
+  font-size: 13px;
+}
+
+.camera-index-label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.camera-index-label input {
+  max-width: 110px;
+}
+
+.camera-control-buttons {
+  display: grid;
+  gap: 8px;
+}
+
+.camera-policy-note {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f1f7f5;
+  color: #50645e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.camera-policy-note strong {
+  color: #204b40;
+}
+
+.camera-runtime-detail {
+  min-height: 58px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: #111b1c;
+  color: #b9d2ca;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 980px) {
+  .live-camera-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .live-camera-head {
+    flex-direction: column;
+  }
+
+  .live-status-stack {
+    justify-content: flex-start;
+  }
+
+  .live-preview-shell,
+  .camera-live-stream {
+    min-height: 300px;
+  }
+}

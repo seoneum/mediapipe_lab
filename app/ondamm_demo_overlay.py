@@ -421,7 +421,7 @@ def render_demo_overlay(
     nearest_distance = _number(status.get("nearest_known_distance"), 1.0)
     _text(preview, f"{lifecycle}", 28, 244, color=(220, 225, 235), thickness=2)
     _text(preview, f"{candidate}  |  nearest {nearest}  d={nearest_distance:0.3f}", 28, 267, color=(180, 195, 210))
-    _text(preview, f"REPEAT  {occurrence} / {threshold}", 28, 293, color=(92, 242, 207), scale=0.64, thickness=2)
+    _text(preview, f"PATTERN MATCH  {occurrence} / {threshold}", 28, 293, color=(92, 242, 207), scale=0.64, thickness=2)
 
     _render_large_guidance(preview, status)
 

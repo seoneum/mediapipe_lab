@@ -13,6 +13,7 @@ from ondamm_micro_motion import EpisodePolicy, MicroMotionEpisodeDetector
 from ondamm_micro_motion_runtime import MicroMotionRuntime, RuntimeOutcome
 from ondamm_pattern_memory import PatternMemoryPolicy, PatternMemoryStore
 from ondamm_temporal_encoder import TemporalEncoder
+from ondamm_child_metric_encoder import load_child_metric_encoder
 from ondamm_temporal_features import PersonalMotionCalibrator, TemporalFeatureAdapter, raw_motion_magnitude
 
 
@@ -43,6 +44,7 @@ class LiveTemporalDemo:
         *,
         child_id: str,
         checkpoint_path: Path,
+        metric_checkpoint_path: Path | None = None,
         pattern_memory_root: Path,
         clips_dir: Path,
         event_metadata_path: Path,
@@ -60,7 +62,7 @@ class LiveTemporalDemo:
         refractory_seconds: float = 0.5,
         min_occurrences_for_clip: int = 3,
         strong_candidate_occurrences: int = 5,
-        candidate_distance_threshold: float = 0.05,
+        candidate_distance_threshold: float | None = None,
         pre_seconds: float = 3.0,
         post_seconds: float = 3.0,
         review_frame_size: tuple[int, int] = (960, 540),
@@ -70,8 +72,20 @@ class LiveTemporalDemo:
         self.session_id = str(session_id).strip()
         if not self.child_id or not self.session_id:
             raise ValueError("child_id and session_id are required")
-        self.encoder = TemporalEncoder.from_checkpoint(checkpoint_path)
-        self.feature_adapter = TemporalFeatureAdapter(self.encoder.spec.feature_names)
+        if metric_checkpoint_path is not None:
+            self.encoder = load_child_metric_encoder(
+                base_checkpoint_path=checkpoint_path,
+                metric_checkpoint_path=metric_checkpoint_path,
+                child_id=self.child_id,
+            )
+        else:
+            self.encoder = TemporalEncoder.from_checkpoint(
+                checkpoint_path
+            )
+
+        self.feature_adapter = TemporalFeatureAdapter(
+            self.encoder.spec.feature_names
+        )
         self.motion_calibrator = PersonalMotionCalibrator(
             calibration_seconds=calibration_seconds,
             minimum_valid_samples=calibration_min_valid_samples,
@@ -83,13 +97,29 @@ class LiveTemporalDemo:
         self.face_loss_reset_seconds = float(face_loss_reset_seconds)
         self.onset_z = float(onset_z)
         self.checkpoint_path = checkpoint_path.expanduser().resolve()
+        self.metric_checkpoint_path = (
+            metric_checkpoint_path.expanduser().resolve()
+            if metric_checkpoint_path is not None
+            else None
+        )
         self.detection_log_path = (
             event_metadata_path.expanduser().resolve().parent
             / "temporal_detections.csv"
         )
         self._logged_episode_ids: set[str] = set()
+        if candidate_distance_threshold is None:
+            candidate_distance_threshold = float(
+                getattr(
+                    self.encoder,
+                    "candidate_distance_threshold",
+                    0.05,
+                )
+            )
+
         policy = PatternMemoryPolicy(
-            candidate_distance_threshold=candidate_distance_threshold,
+            candidate_distance_threshold=float(
+                candidate_distance_threshold
+            ),
             min_occurrences_for_clip=min_occurrences_for_clip,
             strong_candidate_occurrences=max(strong_candidate_occurrences, min_occurrences_for_clip),
         )
@@ -285,6 +315,12 @@ class LiveTemporalDemo:
         return {
             "temporal_enabled": True,
             "checkpoint": self.checkpoint_path.name,
+            "metric_checkpoint": (
+                self.metric_checkpoint_path.name
+                if self.metric_checkpoint_path
+                else None
+            ),
+            "embedding_dimension": self.encoder.spec.embedding_dim,
             "calibration_remaining": self.motion_calibrator.remaining_at(timestamp),
             "calibration_ready": self.motion_calibrator.ready,
             "calibration_status": calibration,
@@ -319,6 +355,21 @@ class LiveTemporalDemo:
         )
         finalized = tuple(_event_from_dict(payload) for payload in outcome.finalized_events)
         return LiveTemporalResult(requested, finalized, outcome)
+
+    def set_event_recording(
+        self,
+        enabled: bool,
+    ) -> None:
+        """Toggle event clip persistence while live analysis continues."""
+        self.runtime.clip_recorder.set_persist_enabled(
+            enabled
+        )
+
+    @property
+    def event_recording_enabled(self) -> bool:
+        return bool(
+            self.runtime.clip_recorder.persist_enabled
+        )
 
     def abort_without_saving(self) -> None:
         self.runtime.abort_without_saving()
